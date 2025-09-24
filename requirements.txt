@@ -1,0 +1,41 @@
+# WARG Drone Competition 2025 - Requirements
+# Core dependencies for the autonomous drone system
+
+# Computer Vision and Image Processing
+opencv-python
+numpy
+
+# Raspberry Pi Camera Support
+picamera2
+
+# GUI Framework (for ground station)
+# tkinter-mapview
+
+# MAVLink Communication
+pymavlink
+
+# KML Export Support
+simplekml
+
+# Data Classes and Typing (built-in for Python 3.7+)
+# dataclasses - built-in
+# typing - built-in
+
+# Standard Library Dependencies (no installation required)
+# tkinter - typically included with Python
+# threading - built-in
+# json - built-in
+# time - built-in
+# math - built-in
+# logging - built-in
+# subprocess - built-in
+# os - built-in
+# re - built-in
+# datetime - built-in
+# decimal - built-in
+
+# GUI Automation (for airside system)
+pyautogui
+
+# Optional: For better performance
+# scipy>=1.10.0  # Uncomment if advanced image processing is needed
