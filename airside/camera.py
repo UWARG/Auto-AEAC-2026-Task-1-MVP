@@ -134,16 +134,30 @@ class Camera:
         self.stop()
         return False
 
-    def detect(
+    def is_colour_in_frame(self, frame: np.ndarray, colour: Colours) -> bool:
+        """
+        Check if a colour is in the frame.
+        """
+        if frame is None or frame.size == 0:
+            logging.warning("Invalid frame provided to is_colour_in_frame method")
+            return False
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, colour.lower_hsv, colour.upper_hsv)
+        return cv2.countNonZero(mask) > 0
+
+    def center_of_target_in_frame(
         self,
         frame: np.ndarray,
         colour: Colours = Colours.WHITE.value,
     ) -> tuple[int, int] | None:
         """
-        Detect IR beacon target in frame and return its center coordinates.
+        Detect target in frame and return its center coordinates.
         """
         if frame is None or frame.size == 0:
-            logging.warning("Invalid frame provided to detect method")
+            logging.warning(
+                "Invalid frame provided to center_of_target_in_frame method"
+            )
             return None
 
         try:
@@ -162,7 +176,7 @@ class Camera:
                 logging.warning("No contours found in frame")
                 return None
 
-            # Find the largest contour (assumed to be the IR beacon)
+            # Find the largest contour (assumed to be the target)
             largest_contour = max(contours, key=cv2.contourArea)
 
             # Calculate the centroid using image moments
@@ -172,12 +186,12 @@ class Camera:
             if moments["m00"] != 0:
                 center_x = int(moments["m10"] / moments["m00"])
                 center_y = int(moments["m01"] / moments["m00"])
-                logging.info(f"Beacon detected at ({center_x}, {center_y})")
+                logging.info(f"Target detected at ({center_x}, {center_y})")
                 return (center_x, center_y)
             else:
                 logging.warning("Contour found but moments calculation failed")
                 return None
 
         except Exception as e:
-            logging.error(f"Error in beacon detection: {e}")
+            logging.error(f"Error in center_of_target_in_frame: {e}")
             return None

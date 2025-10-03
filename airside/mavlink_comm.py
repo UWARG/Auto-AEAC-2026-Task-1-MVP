@@ -6,7 +6,15 @@ including position tracking, RC channel monitoring, and data stream management.
 """
 
 from pymavlink import mavutil
-from util import UINT16_MAX, Coordinate, RCChannel, MavlinkMessageType, Vector3d
+from util import (
+    UINT16_MAX,
+    Colours,
+    Coordinate,
+    RCChannel,
+    MavlinkMessageType,
+    Vector3d,
+)
+from airside.building import Building
 import logging
 import time
 
@@ -104,17 +112,13 @@ class MavlinkComm:
         elif msg.get_type() == MavlinkMessageType.RC_CHANNELS.value:
             logging.info(f"Received RC_CHANNELS: {msg}")
 
-            raw_channels: list[int] = [
-                msg.chan1_raw,
-                msg.chan2_raw,
-                msg.chan3_raw,
-                msg.chan4_raw,
-                msg.chan5_raw,
-                msg.chan6_raw,
-                msg.chan7_raw,
-                msg.chan8_raw,
-                msg.chan9_raw,
-            ]
+            # Programmatically extract all attributes named 'chanX_raw' where X is a positive integer
+            raw_channels: list[int | None] = []
+            for i in range(1, len(self.rc_channels)):
+                attr_name = f"chan{i}_raw"
+                if not hasattr(msg, attr_name):
+                    continue
+                raw_channels.append(getattr(msg, attr_name))
 
             for i, raw in enumerate(raw_channels, start=1):
                 raw = raw if raw is not None else 0
@@ -155,14 +159,17 @@ class MavlinkComm:
 
         try:
             # https://ardupilot.org/dev/docs/copter-commands-in-guided-mode.html#copter-commands-in-guided-mode-set-position-target-local-ned
+            timestamp = int(
+                self.mav.time_since("SYSTEM_TIME") * 1e6
+            )  # Timestamp in microseconds
+            type_mask = 0b110111000111  # Type mask: enable velocity X,Y (disable position, accel, etc.)
+            frame = mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED
             self.mav.mav.set_position_target_local_ned_send(
-                int(
-                    self.mav.time_since("SYSTEM_TIME") * 1e6
-                ),  # Timestamp in microseconds
+                timestamp,
                 self.mav.target_system,
                 self.mav.target_component,
-                mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                0b110111000111,  # Type mask: enable velocity X,Y (disable position, accel, etc.)
+                frame,
+                type_mask,
                 0,
                 0,
                 0,  # Position (unused, masked out)
@@ -179,19 +186,39 @@ class MavlinkComm:
             logging.error(f"Failed to set body velocity: {e}")
             self.set_body_velocity(velocity, attempt + 1)
 
-    def send_coordinate_to_ground(
-        self, coordinate: Coordinate, attempt: int = 0
+    def send_target_to_ground(
+        self, coordinate: Coordinate, colour: Colours, attempt: int = 0
     ) -> None:
-        """Send coordinate to ground station."""
+        """Send target to ground station."""
         if attempt > 3:
-            logging.error("Failed to send coordinate to ground after 3 attempts")
+            logging.error("Failed to send target to ground after 3 attempts")
             return
 
         try:
             self.mav.mav.statustext_send(
                 mavutil.mavlink.MAV_SEVERITY_INFO,  # Severity: informational
-                f"coord_{coordinate.lat}_{coordinate.lon}_{coordinate.alt}".encode(),  # Convert string to bytes
+                f"t_{coordinate.lat}_{coordinate.lon}_{coordinate.alt}_{colour.name}".encode(),  # Convert string to bytes
             )
         except Exception as e:
-            logging.error(f"Failed to send coordinate to ground: {e}")
-            self.send_coordinate_to_ground(coordinate, attempt + 1)
+            logging.error(f"Failed to send target to ground: {e}")
+            self.send_target_to_ground(coordinate, colour, attempt + 1)
+
+    def send_building_info_to_ground(
+        self, building: Building, attempt: int = 0
+    ) -> None:
+        """Send building info to ground station."""
+        if attempt > 3:
+            logging.error("Failed to send building info to ground after 3 attempts")
+            return
+
+        try:
+            for corner in building.corners:
+                if corner is None:
+                    continue
+                self.mav.mav.statustext_send(
+                    mavutil.mavlink.MAV_SEVERITY_INFO,  # Severity: informational
+                    f"b_{corner.lat}_{corner.lon}_{corner.alt}".encode(),
+                )
+        except Exception as e:
+            logging.error(f"Failed to send building info to ground: {e}")
+            self.send_building_info_to_ground(building, attempt + 1)
