@@ -9,6 +9,15 @@ from enum import Enum
 
 UINT16_MAX = 65535
 
+# MAVLink communication constants
+AIRSIDE_COMPONENT_ID = 191
+MAVLINK_TCP_HOST = '127.0.0.1'
+MAVLINK_TCP_PORT = 14550
+MAVLINK_RECEIVE_TIMEOUT_SEC = 1
+
+# Geometric calculation constants
+ALTITUDE_TOLERANCE_M = 0.5  # Tolerance for ground/roof level detection (meters)
+
 
 class MavlinkMessageType(Enum):
     """MAVLink message types used in drone communication"""

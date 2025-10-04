@@ -8,6 +8,7 @@ including position tracking, RC channel monitoring, and data stream management.
 from pymavlink import mavutil
 from util import (
     UINT16_MAX,
+    AIRSIDE_COMPONENT_ID,
     Colour,
     Coordinate,
     RCChannel,
@@ -44,7 +45,10 @@ class MavlinkComm:
         """Establish MAVLink connection to drone via serial port."""
         try:
             self.mav = mavutil.mavlink_connection(
-                "/dev/ttyAMA0", baud=57600, source_component=191, source_system=1
+                "/dev/ttyAMA0",
+                baud=57600,
+                source_component=AIRSIDE_COMPONENT_ID,
+                source_system=1,
             )
             self.mav.wait_heartbeat()
             logging.info(
