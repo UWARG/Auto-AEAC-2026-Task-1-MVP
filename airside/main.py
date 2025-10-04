@@ -15,7 +15,7 @@ import numpy as np
 from airside.building import Building
 from airside.camera import Camera
 from airside.mavlink_comm import MavlinkComm
-from util import Colours, Coordinate, Vector3d
+from util import Coordinate, Vector3d
 
 # This proportional control gain determines how aggressively the drone moves
 # to correct position errors. Smaller values = gentler, more stable movement
@@ -172,7 +172,7 @@ def main() -> None:
                         )
                         return
                 else:
-                    if not building.in_bounds(drone_position):
+                    if building.in_bounds(drone_position):
                         target_position = Coordinate(
                             lat=drone_position.lat,
                             lon=drone_position.lon,
@@ -187,6 +187,8 @@ def main() -> None:
                     f"{camera_name} camera - Lock achieved! Error: {error:.2f} px <= {ERROR_RADIUS_PX} px. "
                     f"Sending target at {target_position} (colour: {target_colour.name}) to ground station"
                 )
+
+                mav_comm.set_body_velocity(Vector3d(0, 0, 0))
                 mav_comm.send_target_to_ground(target_position, target_colour)
                 recorded_resource = True
 
@@ -205,16 +207,17 @@ def main() -> None:
                         y=offset_x * PX_TO_MS,
                         z=offset_y * PX_TO_MS,
                     )
-                mav_comm.set_body_velocity(velocity)
 
                 logging.info(
                     f"{camera_name} camera - Sending velocity command: "
                     f"X={velocity.x:.6f}, Y={velocity.y:.6f}, Z={velocity.z:.6f} m/s"
                 )
+                mav_comm.set_body_velocity(velocity)
             else:
                 logging.info(
                     f"{camera_name} camera - Target already sent to ground, stopping movement"
                 )
+                mav_comm.set_body_velocity(Vector3d(0, 0, 0))
         else:
             logging.warning(f"{camera_name} camera - No target detected in frame")
 

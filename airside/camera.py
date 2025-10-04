@@ -148,9 +148,9 @@ class Camera:
             logging.warning("Invalid frame provided to colour_in_frame method")
             return None
 
+        frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         for colour in [c.value for c in Colours]:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, colour.lower_hsv, colour.upper_hsv)
+            mask = cv2.inRange(frame_hsv, colour.lower_hsv, colour.upper_hsv)
             if cv2.countNonZero(mask) > 0:
                 return colour
         return None
@@ -158,7 +158,7 @@ class Camera:
     def center_of_target_in_frame(
         self,
         frame: np.ndarray,
-        colour: Colours = Colours.WHITE.value,
+        colour: Colour = Colours.WHITE.value,
     ) -> tuple[int, int] | None:
         """
         Detect target in frame and return its center coordinates.

@@ -8,7 +8,7 @@ including position tracking, RC channel monitoring, and data stream management.
 from pymavlink import mavutil
 from util import (
     UINT16_MAX,
-    Colours,
+    Colour,
     Coordinate,
     RCChannel,
     MavlinkMessageType,
@@ -112,18 +112,15 @@ class MavlinkComm:
         elif msg.get_type() == MavlinkMessageType.RC_CHANNELS.value:
             logging.info(f"Received RC_CHANNELS: {msg}")
 
-            # Programmatically extract all attributes named 'chanX_raw' where X is a positive integer
-            raw_channels: list[int | None] = []
-            for i in range(1, len(self.rc_channels)):
-                attr_name = f"chan{i}_raw"
+            # Update RC channels by reading 'chanX_raw' attributes from message
+            for rc_channel_num in self.rc_channels.keys():
+                attr_name = f"chan{rc_channel_num}_raw"
                 if not hasattr(msg, attr_name):
                     continue
-                raw_channels.append(getattr(msg, attr_name))
-
-            for i, raw in enumerate(raw_channels, start=1):
+                raw = getattr(msg, attr_name)
                 raw = raw if raw is not None else 0
-                self.rc_channels[i] = RCChannel(
-                    channel=i, raw=raw, is_active=raw >= 1200
+                self.rc_channels[rc_channel_num] = RCChannel(
+                    channel=rc_channel_num, raw=raw, is_active=raw >= 1200
                 )
 
             return True
@@ -187,7 +184,7 @@ class MavlinkComm:
             self.set_body_velocity(velocity, attempt + 1)
 
     def send_target_to_ground(
-        self, coordinate: Coordinate, colour: Colours, attempt: int = 0
+        self, coordinate: Coordinate, colour: Colour, attempt: int = 0
     ) -> None:
         """Send target to ground station."""
         if attempt > 3:
