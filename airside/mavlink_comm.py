@@ -29,18 +29,18 @@ class MavlinkComm:
         self.heading: float | None = None
 
         self.rc_channels: dict[int, RCChannel] = {
-            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(1, 10)
+            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(7, 10)
         }
 
-        while not self.mavlink_connect():
+        while not self.__mavlink_connect():
             logging.info("Failed to connect to drone, retrying...")
             time.sleep(1)
 
-        while not self.request_data_streams():
+        while not self.__request_data_streams():
             logging.error("Failed to request data streams, retrying...")
             time.sleep(1)
 
-    def mavlink_connect(self) -> bool:
+    def __mavlink_connect(self) -> bool:
         """Establish MAVLink connection to drone via serial port."""
         try:
             self.mav = mavutil.mavlink_connection(
@@ -57,7 +57,7 @@ class MavlinkComm:
         logging.info("Connected to drone")
         return True
 
-    def request_data_streams(self) -> bool:
+    def __request_data_streams(self) -> bool:
         """Request position and RC channel data streams from drone."""
         try:
             # Request position data at 1 Hz
@@ -88,7 +88,7 @@ class MavlinkComm:
     def process_data_stream(self) -> bool:
         """Process incoming MAVLink messages and update drone state."""
         msg = self.mav.recv_match(
-            type=MavlinkMessageType.values(),
+            type=[m.value for m in MavlinkMessageType],
             blocking=False,
         )
         if msg is None:
@@ -202,6 +202,21 @@ class MavlinkComm:
         except Exception as e:
             logging.error(f"Failed to send target to ground: {e}")
             self.send_target_to_ground(coordinate, colour, attempt + 1)
+
+    def send_ack_to_ground(self, msg: str, attempt: int = 0) -> None:
+        """Send acknowledgement to ground station."""
+        if attempt > 3:
+            logging.error("Failed to send acknowledgement to ground after 3 attempts")
+            return
+
+        try:
+            self.mav.mav.statustext_send(
+                mavutil.mavlink.MAV_SEVERITY_INFO,  # Severity: informational
+                f"a_{msg}".encode(),
+            )
+        except Exception as e:
+            logging.error(f"Failed to send acknowledgement to ground: {e}")
+            self.send_ack_to_ground(msg, attempt + 1)
 
     def send_building_info_to_ground(
         self, building: Building, attempt: int = 0

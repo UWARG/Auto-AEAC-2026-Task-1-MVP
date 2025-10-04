@@ -23,7 +23,9 @@ class Building:
 
     def record_corner(self, corner: Coordinate):
         """Record a building corner coordinate in sequence."""
-        self.corners[self.corner_record_cursor] = corner
+        self.corners[self.corner_record_cursor] = Coordinate(
+            corner.lat, corner.lon, self.height
+        )
         self.corner_record_cursor += 1
         if self.corner_record_cursor >= len(self.corners):
             logging.warning("Corner record cursor reached limit, wrapping around")

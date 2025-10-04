@@ -26,13 +26,21 @@ class Camera:
 
     def __init__(
         self,
+        camera_index: int = 0,
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
+
+        Args:
+            camera_index: Camera index (0 for first camera, 1 for second camera)
+            exposure_time: Exposure time in microseconds
+            analogue_gain: Analogue gain value
+            auto_exposure: Enable/disable auto exposure
         """
+        self.camera_index = camera_index
         self.exposure_time = exposure_time
         self.analogue_gain = analogue_gain
         self.auto_exposure_enabled = auto_exposure
@@ -40,7 +48,9 @@ class Camera:
 
         # Retry camera initialization
         while not self._initialize_camera():
-            logging.error("Failed to initialize camera, retrying in 1 second...")
+            logging.error(
+                f"Failed to initialize camera {camera_index}, retrying in 1 second..."
+            )
             time.sleep(1)
 
     def _initialize_camera(self) -> bool:
@@ -48,8 +58,8 @@ class Camera:
         Initialize camera hardware and apply settings.
         """
         try:
-            # Initialize Raspberry Pi Camera Module 2
-            self.picam2 = Picamera2()
+            # Initialize Raspberry Pi Camera Module 2 with specified camera index
+            self.picam2 = Picamera2(self.camera_index)
 
             # Configure camera with preview mode (faster than still mode)
             self.picam2.configure(self.picam2.create_preview_configuration())
@@ -60,11 +70,11 @@ class Camera:
             # Start camera capture
             self.picam2.start()
 
-            logging.info("Camera initialized successfully")
+            logging.info(f"Camera {self.camera_index} initialized successfully")
             return True
 
         except Exception as e:
-            logging.error(f"Failed to initialize camera: {e}")
+            logging.error(f"Failed to initialize camera {self.camera_index}: {e}")
             self.picam2 = None
             return False
 
@@ -89,10 +99,6 @@ class Camera:
     def capture_frame(self) -> np.ndarray | None:
         """
         Capture a single frame from the camera.
-
-        Returns:
-            BGR image array (OpenCV format) with shape (height, width, 3),
-            or None if capture fails
         """
         if self.picam2 is None:
             logging.warning("Camera not initialized, cannot capture frame")
@@ -134,17 +140,20 @@ class Camera:
         self.stop()
         return False
 
-    def is_colour_in_frame(self, frame: np.ndarray, colour: Colours) -> bool:
+    def colour_in_frame(self, frame: np.ndarray) -> Colour | None:
         """
         Check if a colour is in the frame.
         """
         if frame is None or frame.size == 0:
-            logging.warning("Invalid frame provided to is_colour_in_frame method")
-            return False
+            logging.warning("Invalid frame provided to colour_in_frame method")
+            return None
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, colour.lower_hsv, colour.upper_hsv)
-        return cv2.countNonZero(mask) > 0
+        for colour in [c.value for c in Colours]:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, colour.lower_hsv, colour.upper_hsv)
+            if cv2.countNonZero(mask) > 0:
+                return colour
+        return None
 
     def center_of_target_in_frame(
         self,

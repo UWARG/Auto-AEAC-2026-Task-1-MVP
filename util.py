@@ -16,11 +16,6 @@ class MavlinkMessageType(Enum):
     GLOBAL_POSITION_INT = "GLOBAL_POSITION_INT"
     RC_CHANNELS = "RC_CHANNELS"
 
-    @classmethod
-    def values(cls) -> list[str]:
-        """Returns list of all enum values for message type filtering."""
-        return [v.value for v in cls.__members__.values()]
-
 
 class Coordinate:
     """Represents a geographic coordinate with latitude, longitude, and altitude."""
