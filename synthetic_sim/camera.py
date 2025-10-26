@@ -14,6 +14,18 @@ from synthetic_sim.world import World, CircleTarget, Box, Color
 
 
 @dataclass
+class RenderableFace:
+    """A face of a building with its associated targets."""
+
+    corners: List[LocalCoord]  # 4 corners of the face
+    color: Tuple[int, int, int]  # BGR color
+    normal: Tuple[float, float, float]  # Surface normal
+    center: LocalCoord  # Center point of face
+    targets: List[CircleTarget]  # Targets on this face
+    name: str  # Face name for debugging
+
+
+@dataclass
 class CameraConfig:
     """Camera parameters."""
 
@@ -267,10 +279,19 @@ class SyntheticCamera:
             if target_metadata:
                 metadata.append(target_metadata)
 
-        # Render buildings with their associated targets (proper occlusion via depth sorting)
-        for box in self.world.get_all_boxes():
-            box_metadata = self._render_box(frame, box, drone_pos, drone_yaw_deg)
-            metadata.extend(box_metadata)
+        # Extract all faces from all buildings
+        all_faces = self._extract_all_faces()
+
+        # Filter faces based on drone position (back-face culling)
+        visible_faces = self._filter_visible_faces(all_faces, drone_pos)
+
+        # Sort faces by depth (farthest first)
+        sorted_faces = self._sort_faces_by_depth(visible_faces, drone_pos, drone_yaw_deg)
+
+        # Render each face with its targets
+        for face in sorted_faces:
+            face_metadata = self._render_face(frame, face, drone_pos, drone_yaw_deg)
+            metadata.extend(face_metadata)
 
         # Draw crosshair at center
         center_x = self.config.image_width // 2
@@ -285,155 +306,255 @@ class SyntheticCamera:
 
         return frame, metadata
 
-    def _render_box(
-        self, frame: np.ndarray, box: Box, drone_pos: LocalCoord, drone_yaw_deg: float
-    ) -> List[TargetMetadata]:
+    def _extract_all_faces(self) -> List[RenderableFace]:
         """
-        Draw box with filled faces and associated targets.
+        Extract all faces from all buildings with their associated targets.
 
         Returns:
-            List of metadata for visible targets on this box
+            List of RenderableFace objects
+        """
+        faces = []
+        all_targets = self.world.get_all_targets()
+
+        for box in self.world.get_all_boxes():
+            corners = box.get_corners()
+            face_info = box.get_faces()
+
+            # Define face corner indices and properties
+            # Corners: 0=SW-bottom, 1=NW-bottom, 2=NE-bottom, 3=SE-bottom
+            #          4=SW-top,    5=NW-top,    6=NE-top,    7=SE-top
+            # Where: N=+X (cx+hw), S=-X (cx-hw), E=+Y (cy+hd), W=-Y (cy-hd)
+            face_defs = [
+                ("bottom", [0, 1, 2, 3], (140, 140, 140)),
+                ("top", [4, 5, 6, 7], (200, 200, 200)),
+                ("south", [0, 3, 7, 4], (160, 160, 180)),
+                ("north", [1, 2, 6, 5], (160, 160, 180)),
+                ("east", [2, 3, 7, 6], (170, 170, 190)),
+                ("west", [0, 1, 5, 4], (170, 170, 190)),
+            ]
+
+            for face_name, corner_indices, color in face_defs:
+                face_corners = [corners[i] for i in corner_indices]
+                info = face_info[face_name]
+
+                # Find targets on this face
+                face_targets = self._find_targets_for_face(
+                    all_targets, face_name, info["center"], info["normal"]
+                )
+
+                faces.append(
+                    RenderableFace(
+                        corners=face_corners,
+                        color=color,
+                        normal=info["normal"],
+                        center=info["center"],
+                        targets=face_targets,
+                        name=face_name,
+                    )
+                )
+
+        return faces
+
+    def _find_targets_for_face(
+        self,
+        all_targets: List[CircleTarget],
+        face_name: str,
+        face_center: LocalCoord,
+        face_normal: Tuple[float, float, float],
+    ) -> List[CircleTarget]:
+        """
+        Find all targets that belong to a specific face.
+
+        Args:
+            all_targets: All targets in the world
+            face_name: Name of the face
+            face_center: Center position of the face
+            face_normal: Normal vector of the face
+
+        Returns:
+            List of targets on this face
+        """
+        face_targets = []
+
+        for target in all_targets:
+            # Skip ground targets
+            if target.is_on_ground():
+                continue
+
+            # Check if target's surface normal matches this face's normal
+            if target.surface_normal != face_normal:
+                continue
+
+            # Check if target position is on this face (within 0.5m tolerance)
+            on_this_face = False
+
+            if face_name in ["north", "south"]:
+                # X-aligned face: check X coordinate
+                on_this_face = abs(target.position.x - face_center.x) < 0.5
+            elif face_name in ["east", "west"]:
+                # Y-aligned face: check Y coordinate
+                on_this_face = abs(target.position.y - face_center.y) < 0.5
+            elif face_name == "top":
+                # Top face: check Z coordinate
+                on_this_face = abs(target.position.z - face_center.z) < 0.5
+
+            if on_this_face:
+                face_targets.append(target)
+
+        return face_targets
+
+    def _filter_visible_faces(
+        self, faces: List[RenderableFace], drone_pos: LocalCoord
+    ) -> List[RenderableFace]:
+        """
+        Filter faces based on drone position (back-face culling).
+
+        Args:
+            faces: All faces
+            drone_pos: Drone position
+
+        Returns:
+            List of visible faces (facing toward the drone)
+        """
+        visible = []
+
+        for face in faces:
+            # Vector from face center to drone
+            to_drone = np.array(
+                [
+                    drone_pos.x - face.center.x,
+                    drone_pos.y - face.center.y,
+                    drone_pos.z - face.center.z,
+                ]
+            )
+
+            # Dot product with face normal
+            # Positive means face is pointing toward drone
+            dot = np.dot(to_drone, face.normal)
+
+            if dot > 0:
+                visible.append(face)
+
+        return visible
+
+    def _sort_faces_by_depth(
+        self,
+        faces: List[RenderableFace],
+        drone_pos: LocalCoord,
+        drone_yaw_deg: float,
+    ) -> List[RenderableFace]:
+        """
+        Sort faces by average depth (farthest first).
+
+        Args:
+            faces: Faces to sort
+            drone_pos: Drone position
+            drone_yaw_deg: Drone heading
+
+        Returns:
+            Sorted list of faces (farthest to nearest)
+        """
+        face_depths = []
+
+        for face in faces:
+            # Calculate average depth of face corners
+            depths = []
+            for corner in face.corners:
+                cam_coords = self._world_to_camera_coords(
+                    corner, drone_pos, drone_yaw_deg
+                )
+                if cam_coords:
+                    depths.append(cam_coords[0])  # x_cam is depth
+
+            if depths:
+                avg_depth = sum(depths) / len(depths)
+                face_depths.append((avg_depth, face))
+
+        # Sort by depth (farthest first)
+        face_depths.sort(reverse=True, key=lambda x: x[0])
+
+        return [face for _, face in face_depths]
+
+    def _render_face(
+        self,
+        frame: np.ndarray,
+        face: RenderableFace,
+        drone_pos: LocalCoord,
+        drone_yaw_deg: float,
+    ) -> List[TargetMetadata]:
+        """
+        Render a single face with its targets.
+
+        Args:
+            frame: Image to draw on
+            face: Face to render
+            drone_pos: Drone position
+            drone_yaw_deg: Drone heading
+
+        Returns:
+            List of metadata for visible targets on this face
         """
         metadata = []
 
-        corners = box.get_corners()
+        # Project face corners
         projected = []
         cam_coords_list = []
 
-        # Project all corners and store camera coordinates
-        for corner in corners:
+        for corner in face.corners:
             cam_coords = self._world_to_camera_coords(corner, drone_pos, drone_yaw_deg)
             cam_coords_list.append(cam_coords)
 
             if cam_coords:
                 pixel = self._camera_to_pixel(cam_coords)
-                if pixel:
-                    projected.append(pixel)
-                else:
-                    projected.append(None)
+                projected.append(pixel)
             else:
                 projected.append(None)
 
-        # Get all targets that are on walls or roof (not ground)
-        box_targets = [t for t in self.world.get_all_targets() if not t.is_on_ground()]
+        # Check if any corner is visible
+        visible_points = [p for p in projected if p is not None]
 
-        # Define faces with depth calculation
-        faces = [
-            # Each face: (corner indices, base_color, face_name)
-            ([0, 1, 2, 3], (140, 140, 140), "bottom"),  # Bottom
-            ([4, 5, 6, 7], (200, 200, 200), "top"),  # Top
-            ([0, 1, 5, 4], (160, 160, 180), "south"),  # South face
-            ([2, 3, 7, 6], (160, 160, 180), "north"),  # North face
-            ([1, 2, 6, 5], (170, 170, 190), "east"),  # East face
-            ([3, 0, 4, 7], (170, 170, 190), "west"),  # West face
-        ]
+        if len(visible_points) > 0:
+            # If all corners are visible, draw full polygon
+            if all(p is not None for p in projected):
+                pts = np.array(projected, dtype=np.int32)
+                cv2.fillPoly(frame, [pts], face.color)
+                cv2.polylines(frame, [pts], True, (60, 60, 60), 3)
 
-        # Calculate average depth for each face and sort
-        face_depths = []
-        for indices, color, name in faces:
-            # Calculate average camera X coordinate (depth) for this face
-            depths = [
-                cam_coords_list[i][0] if cam_coords_list[i] else float("inf")
-                for i in indices
-            ]
-            if all(d != float("inf") for d in depths):
-                avg_depth = sum(depths) / len(depths)
-                face_depths.append((avg_depth, indices, color, name))
-
-        # Sort faces by depth (farthest first)
-        face_depths.sort(reverse=True, key=lambda x: x[0])
-
-        # Draw faces from back to front, rendering targets on each face
-        for avg_depth, indices, color, name in face_depths:
-            face_points = [projected[i] for i in indices]
-
-            # Check if ANY corner is visible
-            visible_points = [p for p in face_points if p is not None]
-
-            if len(visible_points) > 0:
-                # If all corners are visible, draw full polygon
-                if all(p is not None for p in face_points):
-                    pts = np.array(face_points, dtype=np.int32)
-                    cv2.fillPoly(frame, [pts], color)
-                    cv2.polylines(frame, [pts], True, (60, 60, 60), 3)
-
-                # If partially visible, project with extended bounds
-                # OpenCV will clip the polygon to the frame automatically
-                else:
-                    # For points that project off-screen, use camera coords to estimate position
-                    extended_points = []
-                    for i, (point, cam_coord) in enumerate(
-                        zip(face_points, [cam_coords_list[idx] for idx in indices])
-                    ):
-                        if point is not None:
-                            extended_points.append(point)
-                        elif (
-                            cam_coord and cam_coord[0] > 0
-                        ):  # In front of camera but off-screen
-                            # Manually project without bounds checking
-                            x_cam, y_cam, z_cam = cam_coord
-                            px = int(
-                                (y_cam / x_cam) * self.focal_length
-                                + self.config.image_width / 2
-                            )
-                            py = int(
-                                (z_cam / x_cam) * self.focal_length
-                                + self.config.image_height / 2
-                            )
-                            # Clamp to reasonable extended bounds
-                            px = max(-1000, min(self.config.image_width + 1000, px))
-                            py = max(-1000, min(self.config.image_height + 1000, py))
-                            extended_points.append((px, py))
-
-                    # Draw if we have at least 3 points
-                    if len(extended_points) >= 3:
-                        pts = np.array(extended_points, dtype=np.int32)
-                        cv2.fillPoly(frame, [pts], color)
-                        cv2.polylines(frame, [pts], True, (60, 60, 60), 2)
-
-                # Render targets on this face
-                # Match targets to faces based on surface normal
-                for target in box_targets:
-                    target_on_this_face = False
-
-                    # Check if target's surface normal matches this face
-                    # For simplicity, check if target is on this specific face type
-                    if name == "top" and target.is_on_roof():
-                        target_on_this_face = True
-                    elif (
-                        name in ["north", "south", "east", "west"]
-                        and target.is_on_wall()
-                    ):
-                        # Check if target position matches this face's position
-                        # This is approximate - targets should be within the face bounds
-                        face_info = box.get_faces()[name]
-                        face_center = face_info["center"]
-
-                        # Check if target is approximately on this face
-                        # (within 0.5m of face plane)
-                        if name == "north":
-                            target_on_this_face = (
-                                abs(target.position.x - face_center.x) < 0.5
-                            )
-                        elif name == "south":
-                            target_on_this_face = (
-                                abs(target.position.x - face_center.x) < 0.5
-                            )
-                        elif name == "east":
-                            target_on_this_face = (
-                                abs(target.position.y - face_center.y) < 0.5
-                            )
-                        elif name == "west":
-                            target_on_this_face = (
-                                abs(target.position.y - face_center.y) < 0.5
-                            )
-
-                    if target_on_this_face:
-                        target_metadata = self._render_target(
-                            frame, target, drone_pos, drone_yaw_deg
+            # If partially visible, project with extended bounds
+            else:
+                extended_points = []
+                for point, cam_coord in zip(projected, cam_coords_list):
+                    if point is not None:
+                        extended_points.append(point)
+                    elif cam_coord and cam_coord[0] > 0:
+                        # Manually project without bounds checking
+                        x_cam, y_cam, z_cam = cam_coord
+                        px = int(
+                            (y_cam / x_cam) * self.focal_length
+                            + self.config.image_width / 2
                         )
-                        if target_metadata:
-                            metadata.append(target_metadata)
+                        py = int(
+                            (z_cam / x_cam) * self.focal_length
+                            + self.config.image_height / 2
+                        )
+                        # Clamp to reasonable extended bounds
+                        px = max(-1000, min(self.config.image_width + 1000, px))
+                        py = max(-1000, min(self.config.image_height + 1000, py))
+                        extended_points.append((px, py))
+
+                # Draw if we have at least 3 points
+                if len(extended_points) >= 3:
+                    pts = np.array(extended_points, dtype=np.int32)
+                    cv2.fillPoly(frame, [pts], face.color)
+                    cv2.polylines(frame, [pts], True, (60, 60, 60), 2)
+
+            # Render targets on this face
+            for target in face.targets:
+                target_metadata = self._render_target(
+                    frame, target, drone_pos, drone_yaw_deg
+                )
+                if target_metadata:
+                    metadata.append(target_metadata)
 
         return metadata
 

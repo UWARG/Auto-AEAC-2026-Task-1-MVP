@@ -234,8 +234,9 @@ def create_demo_world() -> World:
     world = World()
 
     # Add building at (20, 15) with 10m width, 8m depth, 12m height
+    # Center is the center of the bottom face, so z=0 puts it on the ground
     building = world.add_box(
-        center=LocalCoord(20, 15, 6),  # Center is at half-height
+        center=LocalCoord(20, 15, 0),  # Bottom face center on ground
         width=10,   # North-South
         depth=8,    # East-West
         height=12,  # Height
