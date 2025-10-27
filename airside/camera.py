@@ -5,11 +5,12 @@ This module provides a Camera class that handles Raspberry Pi Camera Module 2
 operations, including initialization and frame capture.
 """
 
-from picamera2 import Picamera2
+from warg_common.camera import BaseCameraDevice, create_camera, CameraOption
 import numpy as np
 import cv2
 import logging
 import time
+from typing import Literal
 
 from util import Colour, Colours
 
@@ -30,6 +31,7 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
+        mode: Literal["rpi", "webcam"] = "rpi",
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -44,7 +46,9 @@ class Camera:
         self.exposure_time = exposure_time
         self.analogue_gain = analogue_gain
         self.auto_exposure_enabled = auto_exposure
-        self.picam2: Picamera2 | None = None
+        self.mode = mode
+        self._camera: BaseCameraDevice | None = None
+        print("mode", self.mode)
 
         # Retry camera initialization
         while not self._initialize_camera():
@@ -57,88 +61,65 @@ class Camera:
         """
         Initialize camera hardware and apply settings.
         """
-        try:
-            # Initialize Raspberry Pi Camera Module 2 with specified camera index
-            self.picam2 = Picamera2(self.camera_index)
+        # Initialize Raspberry Pi Camera Module 2 with specified camera index
+        if self.mode == "rpi":
+            print("Attempting to initialize rpi camera")
+            from warg_common.camera.camera_picamera2 import ConfigPiCamera2
 
-            # Configure camera with preview mode (faster than still mode)
-            self.picam2.configure(self.picam2.create_preview_configuration())
-
-            # Apply IR detection settings
-            self._apply_camera_settings()
-
-            # Start camera capture
-            self.picam2.start()
-
-            logging.info(f"Camera {self.camera_index} initialized successfully")
-            return True
-
-        except Exception as e:
-            logging.error(f"Failed to initialize camera {self.camera_index}: {e}")
-            self.picam2 = None
-            return False
-
-    def _apply_camera_settings(self) -> None:
-        """
-        Apply camera control settings.
-        """
-        if self.picam2 is None:
-            return
-
-        try:
-            self.picam2.set_controls(
-                {
-                    "AeEnable": self.auto_exposure_enabled,
-                    "ExposureTime": self.exposure_time,
-                    "AnalogueGain": self.analogue_gain,
-                }
+            config = ConfigPiCamera2(
+                exposure_time=self.exposure_time, analogue_gain=self.analogue_gain
             )
-        except Exception as e:
-            logging.error(f"Failed to apply camera settings: {e}")
+            status, obj = create_camera(CameraOption.PICAM2, 500, 500, config)
+            self._camera = obj
+            if status:
+                logging.info(
+                    f"picam2 camera {self.camera_index} initialized successfully"
+                )
+            else:
+                logging.error(f"picam2 camera {self.camera_index} failed to initialize")
+
+            return status
+        else:
+            print("Attempting to annitialize webcam camera")
+            from warg_common.camera.camera_opencv import ConfigOpenCV
+
+            # index0 = webcam
+            config = ConfigOpenCV(device_index=0)
+            status, obj = create_camera(
+                camera_option=CameraOption.OPENCV, width=640, height=480, config=config
+            )
+            self._camera = obj
+            if status:
+                logging.info(
+                    f"opencv camera {self.camera_index} initialized successfully"
+                )
+            else:
+                logging.error(f"opencv camera {self.camera_index} failed to initialize")
+            return status
 
     def capture_frame(self) -> np.ndarray | None:
         """
         Capture a single frame from the camera.
         """
-        if self.picam2 is None:
-            logging.warning("Camera not initialized, cannot capture frame")
-            return None
-
-        try:
-            return self.picam2.capture_array()
-        except Exception as e:
-            logging.error(f"Failed to capture frame: {e}")
-            return None
-
-    def stop(self) -> None:
-        """
-        Stop camera capture and release resources.
-
-        Should be called when done using the camera to properly clean up.
-        """
-        if self.picam2 is None:
-            return
-
-        try:
-            self.picam2.stop()
-            logging.info("Camera stopped successfully")
-        except Exception as e:
-            logging.error(f"Error stopping camera: {e}")
+        if self._camera is not None:
+            status, frame = self._camera.run()
+            if not status:
+                logging.warning(
+                    "Failed frame capture due to camera implementation or timeout"
+                )
+            return frame
+        logging.warning("Attempted to capture frame with initialized camera device")
+        return None
 
     def is_initialized(self) -> bool:
         """
         Check if camera is initialized.
         """
-        return self.picam2 is not None
+        return self._camera is not None
 
     def __enter__(self) -> "Camera":
         """Context manager entry - allows use with 'with' statement."""
         return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        """Context manager exit - ensures camera is stopped."""
-        self.stop()
-        return False
 
     def colour_in_frame(self, frame: np.ndarray) -> Colour | None:
         """
