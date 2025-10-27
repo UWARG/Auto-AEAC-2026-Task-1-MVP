@@ -128,6 +128,14 @@ def draw_target_box(
         return
 
     cx, cy = target_center
+    fx, fy = frame.shape[:2]
+
+    # NOTE: This may loose too much information, look into clipping if necessary
+    if cx - box_size < 0 or cx + box_size > fx:
+        return
+
+    if cy - box_size < 0 or cy + box_size > fy:
+        return
 
     # Draw box
     cv2.rectangle(
@@ -156,6 +164,12 @@ def draw_offset_lines(
     center_x = width // 2
     center_y = height // 2
     target_x, target_y = target_center
+
+    if center_x > width or center_x < 0:
+        return
+
+    if center_y > height or center_y < 0:
+        return
 
     # Draw line from center to target
     cv2.line(frame, (center_x, center_y), (target_x, target_y), color, 2)
@@ -242,9 +256,7 @@ def draw_metrics_panel(
 
     # Color
     if colour is not None:
-        _draw_text_with_background(
-            frame, f"COLOR: {colour.name}", (x, y), COLOR_YELLOW
-        )
+        _draw_text_with_background(frame, f"COLOR: {colour.name}", (x, y), COLOR_YELLOW)
 
 
 def overlay_hud(
@@ -287,9 +299,7 @@ def overlay_hud(
         )
 
     # Draw status panel
-    draw_status_panel(
-        display_frame, camera_label, mode, corner_count, hud_state.locked
-    )
+    draw_status_panel(display_frame, camera_label, mode, corner_count, hud_state.locked)
 
     # Draw metrics panel
     draw_metrics_panel(
@@ -318,7 +328,7 @@ def _draw_text_with_background(
     # Draw background rectangle
     cv2.rectangle(
         frame,
-        (x - 2, y - text_height - 2),
+        (x - 2, 0 if (y - text_height - 2) < 0 else y - text_height - 2),
         (x + text_width + 2, y + baseline + 2),
         COLOR_BLACK,
         -1,

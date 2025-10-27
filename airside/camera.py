@@ -10,6 +10,7 @@ import numpy as np
 import cv2
 import logging
 import time
+from sys import exit
 
 from util import Colour, Colours
 
@@ -46,12 +47,19 @@ class Camera:
         self.auto_exposure_enabled = auto_exposure
         self.picam2: Picamera2 | None = None
 
+        init_attempts = 0
+
         # Retry camera initialization
         while not self._initialize_camera():
             logging.error(
                 f"Failed to initialize camera {camera_index}, retrying in 1 second..."
             )
             time.sleep(1)
+            init_attempts += 1
+
+            if init_attempts > 10:
+                print("Initializing camera failed 10 times, exiting program...")
+                exit(1)
 
     def _initialize_camera(self) -> bool:
         """
@@ -75,6 +83,11 @@ class Camera:
 
         except Exception as e:
             logging.error(f"Failed to initialize camera {self.camera_index}: {e}")
+
+            # NOTE: The closing raises an exception if the close was unsuccessful
+            if self.picam2 is not None:
+                self.picam2.close()
+
             self.picam2 = None
             return False
 
@@ -148,6 +161,7 @@ class Camera:
             logging.warning("Invalid frame provided to colour_in_frame method")
             return None
 
+        # TODO: Narrow down the color bounds!
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         for colour in [c.value for c in Colours]:
             mask = cv2.inRange(frame_hsv, colour.lower_hsv, colour.upper_hsv)

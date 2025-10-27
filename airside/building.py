@@ -8,6 +8,7 @@ based on drone position and heading.
 
 import logging
 import math
+import numpy as np
 
 from util import Coordinate, Vector3d
 
@@ -35,7 +36,8 @@ class Building:
         """Record building height in meters."""
         self.height = height
         self.corners = [
-            Coordinate(c.lat, c.lon, height) if c else None for c in self.corners
+            Coordinate(lon=c.lon, lat=c.lat, alt=height) if c else None
+            for c in self.corners
         ]
 
     def in_bounds(self, point: Coordinate) -> bool:
@@ -45,12 +47,14 @@ class Building:
             return False
 
         # Type guard: all corners are guaranteed to be non-None after the check above
-        xs = [c.lat for c in self.corners if c is not None]
-        ys = [c.lon for c in self.corners if c is not None]
+        xs = [c.lon for c in self.corners if c is not None]
+        ys = [c.lat for c in self.corners if c is not None]
 
         max_x, min_x = max(xs), min(xs)
         max_y, min_y = max(ys), min(ys)
-        return min_x <= point.lat <= max_x and min_y <= point.lon <= max_y
+
+        # NOTE: This may introduce error since this assumes that the earth if flat. Introduce haversine if error is too much.
+        return min_x <= point.lon <= max_x and min_y <= point.lat <= max_y
 
     def find_target_on_wall(self, drone_pos: Coordinate, heading: float) -> Coordinate:
         """Find target coordinate on building wall directly in front of drone."""
@@ -141,23 +145,27 @@ class Building:
         - 0 <= t_seg <= 1: Intersection is within the line segment bounds
         """
         # Calculate the line segment direction vector (from line_start to line_end)
-        line_dx_x = line_end.lon - line_start.lon  # East/West (x-direction)
-        line_dx_y = line_end.lat - line_start.lat  # North/South (y-direction)
+        line_start_coord = np.array([line_start.lon, line_start.lat])
+        line_end_coord = np.array([line_end.lon, line_end.lat])
+        line_vec = line_end_coord - line_start_coord
+
+        ray_start_coord = np.array([ray_start.lon, ray_start.lat])
+        ray_dir_vec = np.array([ray_direction.x, ray_direction.y])
 
         # Calculate the determinant (cross product of ray_direction and line_dx)
         # If zero, the ray and line are parallel (no unique intersection)
-        determinant = ray_direction.x * line_dx_y - ray_direction.y * line_dx_x
+
+        determinant = np.linalg.det(np.array([ray_dir_vec, line_vec]))
 
         if abs(determinant) < 1e-10:
             return None
 
         # Calculate offset from line_start to ray_start
-        dx_lon = ray_start.lon - line_start.lon  # East/West offset (x-direction)
-        dx_lat = ray_start.lat - line_start.lat  # North/South offset (y-direction)
+        offset = ray_start_coord - line_start_coord
 
         # Solve for t_ray and t_seg
-        t_ray = (line_dx_x * dx_lat - line_dx_y * dx_lon) / determinant
-        t_seg = (ray_direction.x * dx_lat - ray_direction.y * dx_lon) / determinant
+        t_ray = np.linalg.det(np.array([line_vec, offset])) / determinant
+        t_seg = np.linalg.det(np.array([ray_dir_vec, offset])) / determinant
 
         # Check if intersection is valid:
         # - t_seg in [0,1]: intersection is on the line segment (not before start or after end)

@@ -124,7 +124,7 @@ class MavlinkComm:
                 raw = getattr(msg, attr_name)
                 raw = raw if raw is not None else 0
                 self.rc_channels[rc_channel_num] = RCChannel(
-                    channel=rc_channel_num, raw=raw, is_active=raw >= 1200
+                    channel=rc_channel_num, raw=raw, is_active=raw >= 1500
                 )
 
             return True

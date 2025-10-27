@@ -8,6 +8,7 @@ human-readable descriptions of target locations.
 import logging
 import math
 from util import Coordinate, ALTITUDE_TOLERANCE_M
+import numpy as np
 
 
 class Building:
@@ -195,35 +196,22 @@ class Building:
         Returns: (closest_point_on_segment, distance)
         """
         # Vector from line_start to line_end
-        line_vec_x = line_end.lon - line_start.lon
-        line_vec_y = line_end.lat - line_start.lat
+        line_start_coord = np.array(line_start)
+        line_end_coord = np.array(line_end)
+        point_coord = np.array(point)
 
-        # Vector from line_start to point
-        point_vec_x = point.lon - line_start.lon
-        point_vec_y = point.lat - line_start.lat
+        distance = np.linalg.norm(
+            np.cross(line_end_coord - line_start_coord, line_start_coord - point_coord)
+        ) / np.linalg.norm(line_end_coord - line_start_coord)
 
-        # Calculate projection parameter
-        line_length_squared = line_vec_x**2 + line_vec_y**2
+        t = np.dot(
+            point_coord - line_start_coord, line_end_coord - line_start_coord
+        ) / np.dot(line_end_coord - line_start_coord, line_end_coord - line_start_coord)
 
-        if line_length_squared < 1e-10:
-            # Degenerate line segment (start == end)
-            return line_start, math.sqrt(self._distance_squared(point, line_start))
-
-        # Project point onto line (parameter t)
-        t = (point_vec_x * line_vec_x + point_vec_y * line_vec_y) / line_length_squared
-
-        # Clamp t to [0, 1] to stay on segment
-        t = max(0.0, min(1.0, t))
-
-        # Find closest point on segment
-        closest = Coordinate(
-            lat=line_start.lat + t * line_vec_y,
-            lon=line_start.lon + t * line_vec_x,
-            alt=line_start.alt,
-        )
-
-        distance = math.sqrt(self._distance_squared(point, closest))
-        return closest, distance
+        closest = point_coord + t * (line_end_coord - line_start_coord)
+        return Coordinate(
+            lon=closest[0], lat=closest[1], alt=point.alt
+        ), distance.astype(float)
 
     def _distance_squared(self, p1: Coordinate, p2: Coordinate) -> float:
         """Calculate squared Euclidean distance between two coordinates."""

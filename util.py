@@ -11,7 +11,7 @@ UINT16_MAX = 65535
 
 # MAVLink communication constants
 AIRSIDE_COMPONENT_ID = 191
-MAVLINK_TCP_HOST = '127.0.0.1'
+MAVLINK_TCP_HOST = "127.0.0.1"
 MAVLINK_TCP_PORT = 14550
 MAVLINK_RECEIVE_TIMEOUT_SEC = 1
 
@@ -29,16 +29,16 @@ class MavlinkMessageType(Enum):
 class Coordinate:
     """Represents a geographic coordinate with latitude, longitude, and altitude."""
 
-    def __init__(self, lat: float, lon: float, alt: float = 0.0):
+    def __init__(self, lon: float, lat: float, alt: float = 0.0):
         self.lat = lat
         self.lon = lon
         self.alt = alt
 
     def __str__(self):
-        return f"({self.lat}, {self.lon}, {self.alt})"
+        return f"({self.lon}, {self.lat}, {self.alt})"
 
     def __repr__(self):
-        return f"Coordinate(lat={self.lat}, lon={self.lon}, alt={self.alt})"
+        return f"Coordinate(lon={self.lon}, lat={self.lat}, alt={self.alt})"
 
 
 class RCChannel:

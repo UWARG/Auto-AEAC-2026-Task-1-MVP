@@ -146,7 +146,7 @@ def main() -> None:
         if frame is None or frame.size == 0:
             logging.warning(f"{camera_name} camera frame is invalid")
             # Reset HUD state
-            hud_state.reset()
+            hud_state.reset_target()
             return
 
         # Calculate image center
@@ -331,6 +331,7 @@ def main() -> None:
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             logging.info("'q' pressed, exiting...")
+            cv2.destroyAllWindows()
             break
 
 
