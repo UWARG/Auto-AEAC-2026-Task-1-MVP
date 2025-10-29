@@ -46,7 +46,7 @@ class MavlinkComm:
         try:
             self.mav = mavutil.mavlink_connection(
                 "tcp:127.0.0.1:5762",
-                # baud=57600,
+                baud=57600,
                 source_component=AIRSIDE_COMPONENT_ID,
                 source_system=1,
             )
@@ -114,7 +114,7 @@ class MavlinkComm:
             return True
 
         elif msg.get_type() == MavlinkMessageType.RC_CHANNELS.value:
-            logging.info(f"Received RC_CHANNELS: {msg}")
+            # logging.info(f"Received RC_CHANNELS: {msg}")
 
             # Update RC channels by reading 'chanX_raw' attributes from message
             for rc_channel_num in self.rc_channels.keys():

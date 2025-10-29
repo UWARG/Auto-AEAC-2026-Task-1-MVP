@@ -12,6 +12,8 @@ import logging
 import time
 from typing import Literal
 
+from warg_common.simulator import SimCamera
+
 from util import Colour, Colours
 
 
@@ -31,7 +33,8 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
-        mode: Literal["rpi", "webcam"] = "rpi",
+        mode: Literal["rpi", "webcam", "sim"] = "rpi",
+        mav_comm=None,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -41,6 +44,8 @@ class Camera:
             exposure_time: Exposure time in microseconds
             analogue_gain: Analogue gain value
             auto_exposure: Enable/disable auto exposure
+            mode: Camera mode (rpi, webcam, sim)
+            mav_comm: MavlinkComm instance (required for sim mode)
         """
         self.camera_index = camera_index
         self.exposure_time = exposure_time
@@ -48,6 +53,7 @@ class Camera:
         self.auto_exposure_enabled = auto_exposure
         self.mode = mode
         self._camera: BaseCameraDevice | None = None
+        self._mav_comm = mav_comm
         print("mode", self.mode)
 
         # Retry camera initialization
@@ -79,7 +85,7 @@ class Camera:
                 logging.error(f"picam2 camera {self.camera_index} failed to initialize")
 
             return status
-        else:
+        elif self.mode == "webcam":
             print("Attempting to annitialize webcam camera")
             from warg_common.camera.camera_opencv import ConfigOpenCV
 
@@ -96,12 +102,94 @@ class Camera:
             else:
                 logging.error(f"opencv camera {self.camera_index} failed to initialize")
             return status
+        else:
+            # sim
+            from warg_common.simulator.world import create_demo_world
+            from warg_common.simulator.coordinates import (
+                CoordinateTransform,
+                GPSCoord,
+                LocalCoord,
+            )
+            from warg_common.simulator.camera import (
+                SimCamera,
+                CameraConfig as SimCameraConfig,
+            )
+
+            if self._mav_comm is None:
+                logging.error(
+                    "MavlinkComm instance required for sim mode initialization"
+                )
+                return False
+
+            # Wait for first GPS position from MAVLink
+            logging.info("Waiting for initial GPS position from MAVLink...")
+            max_attempts = 100
+            for attempt in range(max_attempts):
+                # Process MAVLink messages to get position
+                self._mav_comm.process_data_stream()
+                position = self._mav_comm.get_position()
+
+                # Check if we got a valid position (not the default 0,0,0)
+                if position.lat != 0 or position.lon != 0:
+                    logging.info(f"Got initial GPS position: {position}")
+                    break
+
+                if attempt == max_attempts - 1:
+                    logging.error("Failed to get initial GPS position from MAVLink")
+                    return False
+
+                time.sleep(0.1)
+
+            # Initialize coordinate transform with first GPS position
+            # Drone's starting position becomes local (0, 0, 0)
+            transform = CoordinateTransform()
+            gps_origin = GPSCoord(lat=position.lat, lon=position.lon, alt=position.alt)
+            transform.set_origin(gps_origin, LocalCoord(0, 0, 0))
+            logging.info(
+                f"Initialized coordinate transform with origin: lat={position.lat}, lon={position.lon}, alt={position.alt}m"
+            )
+
+            pitch = 0 if self.camera_index else -90
+
+            config = SimCameraConfig(
+                fov_deg=90,
+                pitch_deg=pitch,
+                world=create_demo_world(),
+                transform=transform,
+            )
+            status, obj = SimCamera.create(640, 480, config)
+            self._camera = obj
+            if status:
+                logging.info(f"sim camera {self.camera_index} initialized successfully")
+            else:
+                logging.error(f"sim camera {self.camera_index} failed to initialize")
+            return status
 
     def capture_frame(self) -> np.ndarray | None:
         """
         Capture a single frame from the camera.
         """
         if self._camera is not None:
+            # Update simulation camera position from MAVLink
+            if self.mode == "sim":
+                from warg_common.simulator.coordinates import GPSCoord
+
+                if self._mav_comm is None:
+                    logging.error("MavlinkComm instance required for sim mode")
+                    return None
+
+                # Get current position and heading from MAVLink
+                position = self._mav_comm.get_position()
+                heading = self._mav_comm.get_heading()
+
+                # Convert util.Coordinate to simulator.GPSCoord
+                gps_coord = GPSCoord(
+                    lat=position.lat, lon=position.lon, alt=position.alt
+                )
+
+                # Update simulation camera with current position
+                self._camera.update_position(gps_coord, heading)
+
             status, frame = self._camera.run()
             if not status:
                 logging.warning(

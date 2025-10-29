@@ -43,7 +43,6 @@ class CameraConfig:
     label: str
     is_down_facing: bool
     channel: int  # RC channel for this camera (A or B)
-    mode: Literal["rpi", "webcam"]
 
 
 def handle_building_record(
@@ -145,10 +144,10 @@ def process_target_locking(
             error=float(error),
         )
 
-        logging.info(
-            f"{camera_name} camera - Target detected at ({target_center_x}, {target_center_y}), "
-            f"offset: ({offset_x}, {offset_y}), error: {error:.2f} px"
-        )
+        # logging.info(
+        #    f"{camera_name} camera - Target detected at ({target_center_x}, {target_center_y}), "
+        #    f"offset: ({offset_x}, {offset_y}), error: {error:.2f} px"
+        # )
 
         if error <= ERROR_RADIUS_PX and not recorded_resource:
             drone_position = mav_comm.get_position()
@@ -288,7 +287,6 @@ def main() -> None:
             label="DOWN",
             is_down_facing=True,
             channel=RESOURCE_RECORD_CHANNEL_A,
-            mode="rpi",
         ),
         "FORWARD": CameraConfig(
             camera=Camera(camera_index=1),
@@ -297,7 +295,6 @@ def main() -> None:
             label="FORWARD",
             is_down_facing=False,
             channel=RESOURCE_RECORD_CHANNEL_B,
-            mode="rpi",
         ),
     }
 
@@ -310,6 +307,7 @@ def main() -> None:
 
     while True:
         # Capture frames from all cameras
+        logging.info("bong")
         frames = {
             label: config.camera.capture_frame()
             for label, config in camera_configs.items()
@@ -374,20 +372,29 @@ def local_test() -> None:
     logging.info("Starting airside...")
 
     mav_comm = MavlinkComm()
+    logging.info("Mavlink communication established..")
     building = Building()
 
+    logging.info("Starting airside...")
     # Initialize camera configurations
     # Camera 0: Down-facing (for building recording/mapping and roof targets)
     # Camera 1: Forward-facing (for target detection on walls)
     camera_configs = {
+        "DOWN": CameraConfig(
+            camera=Camera(camera_index=0, mode="sim", mav_comm=mav_comm),
+            hud_state=HudState(),
+            window_name="Down Camera",
+            label="DOWN",
+            is_down_facing=True,
+            channel=RESOURCE_RECORD_CHANNEL_A,
+        ),
         "FORWARD": CameraConfig(
-            camera=Camera(camera_index=1, mode="webcam"),
+            camera=Camera(camera_index=1, mode="sim", mav_comm=mav_comm),
             hud_state=HudState(),
             window_name="Forward Camera",
             label="FORWARD",
             is_down_facing=False,
             channel=RESOURCE_RECORD_CHANNEL_B,
-            mode="webcam",
         ),
     }
 
@@ -397,6 +404,7 @@ def local_test() -> None:
 
     is_building_record_mode = True
     recorded_resource = False
+    logging.info("Entering event loop..")
 
     while True:
         # Capture frames from all cameras
@@ -419,7 +427,7 @@ def local_test() -> None:
 
         # Update mode state
         is_building_record_mode = mode_channel_active
-
+        """
         # Execute mode-specific functions
         if is_building_record_mode:
             recorded_resource = handle_building_record(
@@ -429,6 +437,7 @@ def local_test() -> None:
             recorded_resource = handle_target_detection(
                 camera_configs, frames, mav_comm, building, recorded_resource
             )
+        """
 
         # Display HUD overlays for all cameras
         mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"
