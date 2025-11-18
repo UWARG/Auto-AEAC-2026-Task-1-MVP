@@ -23,14 +23,14 @@ from util import Coordinate, Vector3d
 
 # This proportional control gain determines how aggressively the drone moves
 # to correct position errors. Smaller values = gentler, more stable movement
-PX_TO_MS = 0.00002  # (m/s) per pixel
+PX_TO_MS = 0.004  # (m/s) per pixel
 
 MODE_CHANGE_CHANNEL = 7
 RESOURCE_RECORD_CHANNEL_A = 8
-RESOURCE_RECORD_CHANNEL_B = 9
+RESOURCE_RECORD_CHANNEL_B = 6
 
 # Target locking threshold: maximum allowed pixel error for successful lock
-ERROR_RADIUS_PX = 40  # pixels
+ERROR_RADIUS_PX = 5  # pixels
 
 
 @dataclass
@@ -144,10 +144,10 @@ def process_target_locking(
             error=float(error),
         )
 
-        # logging.info(
-        #    f"{camera_name} camera - Target detected at ({target_center_x}, {target_center_y}), "
-        #    f"offset: ({offset_x}, {offset_y}), error: {error:.2f} px"
-        # )
+        logging.info(
+            f"{camera_name} camera - Target detected at ({target_center_x}, {target_center_y}), "
+            f"offset: ({offset_x}, {offset_y}), error: {error:.2f} px"
+        )
 
         if error <= ERROR_RADIUS_PX and not recorded_resource:
             drone_position = mav_comm.get_position()
@@ -427,7 +427,6 @@ def local_test() -> None:
 
         # Update mode state
         is_building_record_mode = mode_channel_active
-        """
         # Execute mode-specific functions
         if is_building_record_mode:
             recorded_resource = handle_building_record(
@@ -437,7 +436,6 @@ def local_test() -> None:
             recorded_resource = handle_target_detection(
                 camera_configs, frames, mav_comm, building, recorded_resource
             )
-        """
 
         # Display HUD overlays for all cameras
         mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"

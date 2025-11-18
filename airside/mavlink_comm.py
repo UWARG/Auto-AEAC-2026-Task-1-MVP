@@ -30,7 +30,7 @@ class MavlinkComm:
         self.heading: float | None = None
 
         self.rc_channels: dict[int, RCChannel] = {
-            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(7, 10)
+            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(1, 10)
         }
 
         while not self.__mavlink_connect():
@@ -45,7 +45,7 @@ class MavlinkComm:
         """Establish MAVLink connection to drone via serial port."""
         try:
             self.mav = mavutil.mavlink_connection(
-                "tcp:127.0.0.1:5762",
+                "tcp:10.31.12.224:5762",
                 baud=57600,
                 source_component=AIRSIDE_COMPONENT_ID,
                 source_system=1,
@@ -64,12 +64,12 @@ class MavlinkComm:
     def __request_data_streams(self) -> bool:
         """Request position and RC channel data streams from drone."""
         try:
-            # Request position data at 1 Hz
+            # Request position data at 20 Hz for smooth camera simulation
             self.mav.mav.request_data_stream_send(
                 self.mav.target_system,  # Target system ID (the drone)
                 self.mav.target_component,  # Target component ID (autopilot)
                 mavutil.mavlink.MAV_DATA_STREAM_POSITION,  # Position data stream
-                1,  # Rate: 1 Hz
+                20,  # Rate: 20 Hz
                 1,  # Start streaming (1=enable, 0=disable)
             )
 
@@ -82,7 +82,9 @@ class MavlinkComm:
                 1,  # Start streaming (1=enable, 0=disable)
             )
 
-            logging.info("Requested GLOBAL_POSITION_INT and RC_CHANNELS streams")
+            logging.info(
+                "Requested GLOBAL_POSITION_INT (20 Hz) and RC_CHANNELS (5 Hz) streams"
+            )
         except Exception as e:
             logging.error(f"Failed to request data streams: {e}")
             return False
@@ -99,7 +101,7 @@ class MavlinkComm:
             return False
 
         if msg.get_type() == MavlinkMessageType.GLOBAL_POSITION_INT.value:
-            logging.info(f"Received GLOBAL_POSITION_INT: {msg}")
+            # logging.info(f"Received GLOBAL_POSITION_INT: {msg}")
             # messages are sent as ints, so we need to convert them to floats
             self.position = Coordinate(
                 lat=msg.lat / 1e7,
@@ -194,6 +196,9 @@ class MavlinkComm:
         if attempt > 3:
             logging.error("Failed to send target to ground after 3 attempts")
             return
+        logging.info(
+            f"sending target with colour {colour.name} at {coordinate.lat}, {coordinate.lon}, {coordinate.alt}"
+        )
 
         try:
             self.mav.mav.statustext_send(
@@ -229,6 +234,7 @@ class MavlinkComm:
 
         try:
             for corner in building.corners:
+                print("Corner: ", corner)
                 if corner is None:
                     continue
                 self.mav.mav.statustext_send(

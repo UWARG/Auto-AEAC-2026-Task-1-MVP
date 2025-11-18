@@ -211,23 +211,90 @@ class Camera:
 
     def colour_in_frame(self, frame: np.ndarray) -> Colour | None:
         """
-        Check if a colour is in the frame.
+        Detect colored circular targets in the frame.
+        Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
             logging.warning("Invalid frame provided to colour_in_frame method")
             return None
 
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        frame_height, frame_width = frame.shape[:2]
+        frame_center_x = frame_width / 2
+        frame_center_y = frame_height / 2
+
+        # Thresholds for detection
+        MIN_AREA = 100  # Minimum contour area in pixels
+        MIN_CIRCULARITY = 0.6  # Circularity threshold (1.0 = perfect circle)
+        MIN_FILL_RATIO = 0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
+
+        # Track the closest circular target to frame center
+        min_distance = float('inf')
+        detected_colour = None
+
         for colour in [c.value for c in Colours]:
             mask = cv2.inRange(frame_hsv, colour.lower_hsv, colour.upper_hsv)
-            if cv2.countNonZero(mask) > 0:
-                return colour
-        return None
+
+            # Find contours in the mask
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < MIN_AREA:
+                    continue
+
+                # Calculate circularity: 4*pi*area / perimeter^2
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter == 0:
+                    continue
+
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+                if circularity < MIN_CIRCULARITY:
+                    continue
+
+                # Check fill ratio: ensure the contour is solid, not hollow
+                # Create a mask for just this contour
+                contour_mask = np.zeros(frame_hsv.shape[:2], dtype=np.uint8)
+                cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+
+                # Count colored pixels within the contour
+                colored_pixels_in_contour = cv2.countNonZero(cv2.bitwise_and(mask, contour_mask))
+                fill_ratio = colored_pixels_in_contour / area if area > 0 else 0
+
+                if fill_ratio < MIN_FILL_RATIO:
+                    continue
+
+                # Calculate center of this circular contour
+                moments = cv2.moments(contour)
+                if moments["m00"] != 0:
+                    center_x = moments["m10"] / moments["m00"]
+                    center_y = moments["m01"] / moments["m00"]
+
+                    # Calculate distance from frame center
+                    distance = np.sqrt(
+                        (center_x - frame_center_x)**2 +
+                        (center_y - frame_center_y)**2
+                    )
+
+                    if distance < min_distance:
+                        min_distance = distance
+                        detected_colour = colour
+
+        if detected_colour is not None:
+            logging.info(
+                f"Detected {detected_colour.name} circular target "
+                f"at distance {min_distance:.1f} pixels from center"
+            )
+
+        return detected_colour
 
     def center_of_target_in_frame(
         self,
         frame: np.ndarray,
-        colour: Colour = Colours.WHITE.value,
+        colour: Colour,
     ) -> tuple[int, int] | None:
         """
         Detect target in frame and return its center coordinates.
