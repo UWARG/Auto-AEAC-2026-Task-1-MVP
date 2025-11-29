@@ -186,6 +186,103 @@ class MavlinkComm:
         except Exception as e:
             logging.error(f"Failed to set body velocity: {e}")
             self.set_body_velocity(velocity, attempt + 1)
+    
+
+    def set_landing_target(self, angleOffset: list[int], attempt: int = 0) -> None:
+        """Set landing_target in body frame with (radian) angle offset."""
+        if attempt > 3:
+            logging.error("Failed to send landing target after 3 attempts")
+            return
+
+        try:
+            # https://ardupilot.org/dev/docs/mavlink-precision-landing.html
+            timestamp = int(
+                self.mav.time_since("SYSTEM_TIME") * 1e6
+            )  # Timestamp in microseconds
+
+            frame = mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED # same as MAV_FRAME_BODY_FRD
+            self.mav.mav.landing_target_send(
+                timestamp,
+                0,  # target_num (unused)
+                frame,
+                angleOffset[0], # X angle offset in radians
+                angleOffset[1], # Y angle offset in radians
+                0,  # Distance (unknown)
+                0,  # Size_x (unused)
+                0,  # Size_y (unused)
+                0,  # x position (unknown)
+                0,  # y position (unknown)
+                0,  # z position (unknown)
+                0,  # quaternion (unused)
+                0,  # type (unused)
+                0,  # position_valid = 0 to use angles rather than xyz
+                    # https://ardupilot.org/dev/docs/mavlink-precision-landing.html
+            )
+
+        except Exception as e:
+            logging.error(f"Failed to set landing_target: {e}")
+            self.set_landing_target(angleOffset, attempt + 1)
+
+
+    def enter_loiter(self, attempt: int = 0) -> bool:
+        """Enter loiter mode."""
+        if attempt > 3:
+            logging.error("Failed to enter loiter mode after 3 attempts")
+            return False
+    
+        try:
+            # send command to change to loiter mode
+            self.mav.mav.command_long_send(
+                self.mav.target_system,     # Target system ID
+                self.mav.target_component,  # Target component ID
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,  # ID of command to send
+                0,                          # Confirmation
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,   # param1: set custom mode
+                5,                          # param2: loiter mode (https://ardupilot.org/copter/docs/parameters.html#fltmode1)
+                0,
+                0,
+                0,
+                0,
+                0
+            )
+            logging.info("Entered loiter mode")
+
+        except Exception as e:
+            logging.error(f"Failed to enter loiter mode: {e}")
+            self.enter_loiter(attempt + 1)
+
+        return True
+
+    def enter_guided(self, attempt: int = 0) -> bool:
+        """Exit guided mode."""
+        if attempt > 3:
+            logging.error("Failed to enter guided mode after 3 attempts")
+            return False
+        
+        try:
+            # send command to change to guided mode
+            self.mav.mav.command_long_send(
+                self.mav.target_system,     # Target system ID
+                self.mav.target_component,  # Target component ID
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,  # ID of command to send
+                0,                          # Confirmation
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,   # param1: set custom mode
+                4,                          # param2: guided mode (https://ardupilot.org/copter/docs/parameters.html#fltmode1)
+                0,
+                0,
+                0,
+                0,
+                0
+            )
+
+            logging.info("Entered guided mode")
+            
+        except Exception as e:
+            logging.error(f"Failed to enter guided mode: {e}")
+            self.enter_guided(attempt + 1)
+
+        return True
+    
 
     def send_target_to_ground(
         self, coordinate: Coordinate, colour: Colour, attempt: int = 0

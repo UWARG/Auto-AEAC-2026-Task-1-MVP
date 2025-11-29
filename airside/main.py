@@ -26,6 +26,7 @@ PX_TO_MS = 0.00002  # (m/s) per pixel
 MODE_CHANGE_CHANNEL = 7
 RESOURCE_RECORD_CHANNEL_A = 8
 RESOURCE_RECORD_CHANNEL_B = 9
+FOCAL_LENGTH_PX = 1000 
 
 # Target locking threshold: maximum allowed pixel error for successful lock
 ERROR_RADIUS_PX = 40  # pixels
@@ -55,6 +56,7 @@ def main() -> None:
 
     is_building_record_mode = True
     recorded_resource = False
+    in_loiter = False
 
     # HUD state tracking
     hud_state_down = HudState()
@@ -141,6 +143,7 @@ def main() -> None:
         Process target detection and locking for a specific camera.
         """
         nonlocal recorded_resource
+        nonlocal in_loiter
         camera_name = "DOWN" if is_down_facing else "FORWARD"
 
         if frame is None or frame.size == 0:
@@ -167,6 +170,7 @@ def main() -> None:
 
         target_center = camera.center_of_target_in_frame(frame, target_colour)
 
+        # if target is in the camera frame
         if target_center:
             target_center_x, target_center_y = target_center
 
@@ -184,11 +188,16 @@ def main() -> None:
                 error=float(error),
             )
 
+            # Enter loiter mode
+            if not in_loiter:
+                in_loiter = mav_comm.enter_loiter()
+
             logging.info(
                 f"{camera_name} camera - Target detected at ({target_center_x}, {target_center_y}), "
                 f"offset: ({offset_x}, {offset_y}), error: {error:.2f} px"
             )
-
+            
+            # if target is close enough to centered
             if error <= ERROR_RADIUS_PX and not recorded_resource:
                 drone_position = mav_comm.get_position()
 
@@ -221,51 +230,68 @@ def main() -> None:
                     f"Sending target at {target_position} (colour: {target_colour.name}) to ground station"
                 )
 
-                velocity = Vector3d(0, 0, 0)
-                mav_comm.set_body_velocity(velocity)
+                angleOffset = [0, 0]
+                mav_comm.set_landing_target(angleOffset)
                 mav_comm.send_target_to_ground(target_position, target_colour)
                 recorded_resource = True
 
                 # Update HUD state for lock
-                hud_state.update_velocity(velocity)
+                hud_state.update_velocity(Vector3d(0, 0, 0))
                 hud_state.set_locked(True)
 
                 return
 
+            # if target not yet centered
             if not recorded_resource:
+                
+                # update angle offsets 
                 if is_down_facing:
-                    velocity = Vector3d(
-                        x=-offset_y * PX_TO_MS,
-                        y=offset_x * PX_TO_MS,
-                        z=0.0,
-                    )
+                    angleOffset = [
+                        math.atan2(offset_x, FOCAL_LENGTH_PX),
+                        math.atan2(-offset_y, FOCAL_LENGTH_PX),
+                    ]
+
                 else:
-                    velocity = Vector3d(
-                        x=0.0,
-                        y=offset_x * PX_TO_MS,
-                        z=offset_y * PX_TO_MS,
-                    )
+                    """ 
+                    i believe this stiil needs to be changed to reflect the fact that this is a forward facing camera. 
+                    even if we used matrix math to change the angles, since the precision loiter
+                    system expects angles relative to the down direction of the drone, i think it would just move
+                    forwards/backwards and left/right rather than up/down and left/right.
+                     
+                    setting PLND_ORIENT and PLND_YAW_ALIGN could fix this, but would require a reboot on change"""
+                    angleOffset = [
+                        math.atan2(offset_x, FOCAL_LENGTH_PX),
+                        math.atan2(-offset_y, FOCAL_LENGTH_PX),
+                    ]
 
                 logging.info(
-                    f"{camera_name} camera - Sending velocity command: "
-                    f"X={velocity.x:.6f}, Y={velocity.y:.6f}, Z={velocity.z:.6f} m/s"
+                    f"{camera_name} camera - Sending target angle offset: "
+                    f"X={angleOffset[0]:.6f}, Y={angleOffset[1]:.6f} radians"
                 )
-                mav_comm.set_body_velocity(velocity)
+                mav_comm.set_landing_target(angleOffset)
 
                 # Update HUD state with velocity
-                hud_state.update_velocity(velocity)
+                hud_state.update_velocity(Vector3d(0, 0, 0))
                 hud_state.set_locked(False)
+                
             else:
                 logging.info(
                     f"{camera_name} camera - Target already sent to ground, stopping movement"
                 )
-                velocity = Vector3d(0, 0, 0)
-                mav_comm.set_body_velocity(velocity)
+                angleOffset = [0, 0]
+                mav_comm.set_landing_target(angleOffset)
 
                 # Update HUD state
-                hud_state.update_velocity(velocity)
+                hud_state.update_velocity(Vector3d(0, 0, 0))
                 hud_state.set_locked(True)
+
+
+        # if target is not in the camera frame        
         else:
+            if in_loiter:
+                # Reset loiter state
+                in_loiter = not mav_comm.enter_guided()
+
             logging.warning(f"{camera_name} camera - No target detected in frame")
             # Clear target HUD state
             hud_state.reset_target()
