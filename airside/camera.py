@@ -6,15 +6,26 @@ operations, including initialization and frame capture.
 """
 
 from warg_common.camera import BaseCameraDevice, create_camera, CameraOption
+from dataclasses import dataclass
 import numpy as np
 import cv2
 import logging
 import time
-from typing import Literal
+from typing import Literal, List, Tuple
 
 from warg_common.simulator import SimCamera
 
 from util import Colour, Colours
+
+
+@dataclass
+class TargetDetection:
+    colour: Colour
+    x: float
+    y: float
+    circularity: float
+    coverage: float
+    area: float
 
 
 class Camera:
@@ -33,7 +44,7 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
-        mode: Literal["rpi", "webcam", "sim"] = "rpi",
+        mode: Literal["rpi", "webcam", "sim", "dummy"] = "rpi",
         mav_comm=None,
     ) -> None:
         """
@@ -57,11 +68,12 @@ class Camera:
         print("mode", self.mode)
 
         # Retry camera initialization
-        while not self._initialize_camera():
-            logging.error(
-                f"Failed to initialize camera {camera_index}, retrying in 1 second..."
-            )
-            time.sleep(1)
+        if mode != "dummy":
+            while not self._initialize_camera():
+                logging.error(
+                    f"Failed to initialize camera {camera_index}, retrying in 1 second..."
+                )
+                time.sleep(1)
 
     def _initialize_camera(self) -> bool:
         """
@@ -209,28 +221,23 @@ class Camera:
         """Context manager entry - allows use with 'with' statement."""
         return self
 
-    def colour_in_frame(self, frame: np.ndarray) -> Colour | None:
+    def find_targets(
+        self, frame: np.ndarray
+    ) -> List[Tuple[Tuple[float, float], Colour | None]]:
         """
         Detect colored circular targets in the frame.
         Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
             logging.warning("Invalid frame provided to colour_in_frame method")
-            return None
+            return []
 
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        frame_height, frame_width = frame.shape[:2]
-        frame_center_x = frame_width / 2
-        frame_center_y = frame_height / 2
-
-        # Thresholds for detection
-        MIN_AREA = 100  # Minimum contour area in pixels
-        MIN_CIRCULARITY = 0.6  # Circularity threshold (1.0 = perfect circle)
-        MIN_FILL_RATIO = 0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
 
         # Track the closest circular target to frame center
-        min_distance = float('inf')
+        min_distance = float("inf")
         detected_colour = None
+        targets = []
 
         for colour in [c.value for c in Colours]:
             mask = cv2.inRange(frame_hsv, colour.lower_hsv, colour.upper_hsv)
@@ -242,8 +249,6 @@ class Camera:
 
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area < MIN_AREA:
-                    continue
 
                 # Calculate circularity: 4*pi*area / perimeter^2
                 perimeter = cv2.arcLength(contour, True)
@@ -252,91 +257,56 @@ class Camera:
 
                 circularity = 4 * np.pi * area / (perimeter * perimeter)
 
-                if circularity < MIN_CIRCULARITY:
-                    continue
-
                 # Check fill ratio: ensure the contour is solid, not hollow
                 # Create a mask for just this contour
                 contour_mask = np.zeros(frame_hsv.shape[:2], dtype=np.uint8)
                 cv2.drawContours(contour_mask, [contour], -1, 255, -1)
 
                 # Count colored pixels within the contour
-                colored_pixels_in_contour = cv2.countNonZero(cv2.bitwise_and(mask, contour_mask))
+                colored_pixels_in_contour = cv2.countNonZero(
+                    cv2.bitwise_and(mask, contour_mask)
+                )
                 fill_ratio = colored_pixels_in_contour / area if area > 0 else 0
-
-                if fill_ratio < MIN_FILL_RATIO:
-                    continue
 
                 # Calculate center of this circular contour
                 moments = cv2.moments(contour)
-                if moments["m00"] != 0:
-                    center_x = moments["m10"] / moments["m00"]
-                    center_y = moments["m01"] / moments["m00"]
+                if moments["m00"] == 0:
+                    continue
 
-                    # Calculate distance from frame center
-                    distance = np.sqrt(
-                        (center_x - frame_center_x)**2 +
-                        (center_y - frame_center_y)**2
+                center_x = moments["m10"] / moments["m00"]
+                center_y = moments["m01"] / moments["m00"]
+                targets.append(
+                    TargetDetection(
+                        colour, center_x, center_y, circularity, fill_ratio, area
                     )
+                )
 
-                    if distance < min_distance:
-                        min_distance = distance
-                        detected_colour = colour
+        return targets
 
-        if detected_colour is not None:
-            logging.info(
-                f"Detected {detected_colour.name} circular target "
-                f"at distance {min_distance:.1f} pixels from center"
-            )
+    def get_best_target(self, targets: List[TargetDetection]) -> TargetDetection | None:
+        best_target = None
+        min_dist = float("inf")
 
-        return detected_colour
+        center_x = 250
+        center_y = 250
 
-    def center_of_target_in_frame(
-        self,
-        frame: np.ndarray,
-        colour: Colour,
-    ) -> tuple[int, int] | None:
-        """
-        Detect target in frame and return its center coordinates.
-        """
-        if frame is None or frame.size == 0:
-            logging.warning(
-                "Invalid frame provided to center_of_target_in_frame method"
-            )
-            return None
+        for target in targets:
+            if not self.is_valid_target(target):
+                continue
+            dist = (center_x - target.x) ** 2 + (center_y - target.y) ** 2
+            if dist < min_dist:
+                min_dist = dist
+                best_target = target
 
-        try:
-            # Convert frame from BGR to HSV color space
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        return best_target
 
-            # Create binary mask of pixels within HSV thresholds
-            mask = cv2.inRange(hsv, colour.lower_hsv, colour.upper_hsv)
-
-            # Find contours in the binary mask
-            contours, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            if not contours:
-                logging.warning("No contours found in frame")
-                return None
-
-            # Find the largest contour (assumed to be the target)
-            largest_contour = max(contours, key=cv2.contourArea)
-
-            # Calculate the centroid using image moments
-            moments = cv2.moments(largest_contour)
-
-            # Avoid division by zero
-            if moments["m00"] != 0:
-                center_x = int(moments["m10"] / moments["m00"])
-                center_y = int(moments["m01"] / moments["m00"])
-                logging.info(f"Target detected at ({center_x}, {center_y})")
-                return (center_x, center_y)
-            else:
-                logging.warning("Contour found but moments calculation failed")
-                return None
-
-        except Exception as e:
-            logging.error(f"Error in center_of_target_in_frame: {e}")
-            return None
+    def is_valid_target(self, target: TargetDetection) -> bool:
+        # Thresholds for detection
+        MIN_AREA = 100  # Minimum contour area in pixels
+        MIN_CIRCULARITY = 0.6  # Circularity threshold (1.0 = perfect circle)
+        MIN_FILL_RATIO = 0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
+        return not (
+            target.area < MIN_AREA
+            or target.circularity < MIN_CIRCULARITY
+            or target.coverage < MIN_FILL_RATIO
+        )
