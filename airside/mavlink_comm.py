@@ -151,44 +151,9 @@ class MavlinkComm:
             logging.warning("Heading is not available")
             return 0.0
         return self.heading
-
-    def set_body_velocity(self, velocity: Vector3d, attempt: int = 0) -> None:
-        """Set drone velocity in body frame (x=forward, y=right, z=down)."""
-        if attempt > 3:
-            logging.error("Failed to set body velocity after 3 attempts")
-            return
-
-        try:
-            # https://ardupilot.org/dev/docs/copter-commands-in-guided-mode.html#copter-commands-in-guided-mode-set-position-target-local-ned
-            timestamp = int(
-                self.mav.time_since("SYSTEM_TIME") * 1e6
-            )  # Timestamp in microseconds
-            type_mask = 0b110111000111  # Type mask: enable velocity X,Y (disable position, accel, etc.)
-            frame = mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED
-            self.mav.mav.set_position_target_local_ned_send(
-                timestamp,
-                self.mav.target_system,
-                self.mav.target_component,
-                frame,
-                type_mask,
-                0,
-                0,
-                0,  # Position (unused, masked out)
-                velocity.x,
-                velocity.y,
-                velocity.z,
-                0,
-                0,
-                0,  # Acceleration (unused, masked out)
-                0,
-                0,  # Yaw and yaw rate (unused, maintain current heading)
-            )
-        except Exception as e:
-            logging.error(f"Failed to set body velocity: {e}")
-            self.set_body_velocity(velocity, attempt + 1)
     
 
-    def set_landing_target(self, angleOffset: list[int], attempt: int = 0) -> None:
+    def set_landing_target(self, angleOffset: list[int] = [0, 0], attempt: int = 0) -> None:
         """Set landing_target in body frame with (radian) angle offset."""
         if attempt > 3:
             logging.error("Failed to send landing target after 3 attempts")

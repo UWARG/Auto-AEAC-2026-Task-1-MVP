@@ -20,7 +20,6 @@ class HudState:
         self.offset_x: float | None = None
         self.offset_y: float | None = None
         self.error: float | None = None
-        self.velocity: Vector3d | None = None
         self.locked: bool = False
 
     def reset(self) -> None:
@@ -30,11 +29,10 @@ class HudState:
         self.offset_x = None
         self.offset_y = None
         self.error = None
-        self.velocity = Vector3d(0, 0, 0)
         self.locked = False
 
     def reset_target(self) -> None:
-        """Reset only target-related state, keeping velocity and lock status."""
+        """Reset only target-related state, keeping lock status."""
         self.target_center = None
         self.offset_x = None
         self.offset_y = None
@@ -54,10 +52,6 @@ class HudState:
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.error = error
-
-    def update_velocity(self, velocity: Vector3d) -> None:
-        """Update velocity command."""
-        self.velocity = velocity
 
     def set_locked(self, locked: bool) -> None:
         """Set lock status."""
@@ -206,7 +200,6 @@ def draw_metrics_panel(
     offset_x: float | None = None,
     offset_y: float | None = None,
     error: float | None = None,
-    velocity: Vector3d | None = None,
     colour: Colour | None = None,
 ) -> None:
     """Draw metrics panel in bottom-left corner."""
@@ -230,15 +223,6 @@ def draw_metrics_panel(
         _draw_text_with_background(frame, f"ERROR: {error:.1f}px", (x, y), error_color)
         y += TEXT_LINE_HEIGHT
 
-    # Velocity
-    if velocity is not None:
-        _draw_text_with_background(
-            frame,
-            f"VEL: X={velocity.x:.3f} Y={velocity.y:.3f} Z={velocity.z:.3f}",
-            (x, y),
-            COLOR_WHITE,
-        )
-        y += TEXT_LINE_HEIGHT
 
     # Color
     if colour is not None:
@@ -297,7 +281,6 @@ def overlay_hud(
         hud_state.offset_x,
         hud_state.offset_y,
         hud_state.error,
-        hud_state.velocity,
         hud_state.target_colour,
     )
 

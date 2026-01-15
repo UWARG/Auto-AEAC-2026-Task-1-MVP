@@ -230,15 +230,13 @@ def main() -> None:
                     f"Sending target at {target_position} (colour: {target_colour.name}) to ground station"
                 )
 
-                angleOffset = [0, 0]
-                mav_comm.set_landing_target(angleOffset)
+                mav_comm.set_landing_target() # default angle is [0,0]
                 mav_comm.send_target_to_ground(target_position, target_colour)
                 recorded_resource = True
 
                 # Update HUD state for lock
-                hud_state.update_velocity(Vector3d(0, 0, 0))
                 hud_state.set_locked(True)
-
+                
                 return
 
             # if target not yet centered
@@ -253,12 +251,13 @@ def main() -> None:
 
                 else:
                     """ 
-                    i believe this stiil needs to be changed to reflect the fact that this is a forward facing camera. 
+                    i believe this still needs to be changed to reflect the fact that this is a forward facing camera. 
                     even if we used matrix math to change the angles, since the precision loiter
                     system expects angles relative to the down direction of the drone, i think it would just move
                     forwards/backwards and left/right rather than up/down and left/right.
                      
-                    setting PLND_ORIENT and PLND_YAW_ALIGN could fix this, but would require a reboot on change"""
+                    setting PLND_ORIENT and PLND_YAW_ALIGN could fix this, but would require a reboot on change
+                    """
                     angleOffset = [
                         math.atan2(offset_x, FOCAL_LENGTH_PX),
                         math.atan2(-offset_y, FOCAL_LENGTH_PX),
@@ -270,8 +269,7 @@ def main() -> None:
                 )
                 mav_comm.set_landing_target(angleOffset)
 
-                # Update HUD state with velocity
-                hud_state.update_velocity(Vector3d(0, 0, 0))
+                # set locked
                 hud_state.set_locked(False)
                 
             else:
@@ -282,7 +280,6 @@ def main() -> None:
                 mav_comm.set_landing_target(angleOffset)
 
                 # Update HUD state
-                hud_state.update_velocity(Vector3d(0, 0, 0))
                 hud_state.set_locked(True)
 
 
@@ -290,7 +287,7 @@ def main() -> None:
         else:
             if in_loiter:
                 # Reset loiter state
-                in_loiter = not mav_comm.enter_guided()
+                in_loiter = not mav_comm.enter_guided() # right now it enters guided mode, might need to change depending on what pilots say
 
             logging.warning(f"{camera_name} camera - No target detected in frame")
             # Clear target HUD state
