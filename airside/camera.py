@@ -32,11 +32,13 @@ class TargetDetection:
 
 class OakDCameraDevice:
     def __init__(self, camera_index: int, exposure_time: int, analogue_gain: float):
+        logging.info(f"DepthAI version: {dai.__version__}")
         self.pipeline = dai.Pipeline()
 
         # Define source and output
-        cam_rgb = self.pipeline.create(dai.node.ColorCamera)
-        xout_video = self.pipeline.create(dai.node.XLinkOut)
+        # Use factory methods for better compatibility
+        cam_rgb = self.pipeline.createColorCamera()
+        xout_video = self.pipeline.createXLinkOut()
 
         xout_video.setStreamName("video")
 
