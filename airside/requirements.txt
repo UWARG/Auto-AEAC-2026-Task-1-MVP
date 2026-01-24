@@ -2,4 +2,4 @@ opencv-python
 numpy
 picamera2
 pymavlink
-depthai
+depthai<3.0

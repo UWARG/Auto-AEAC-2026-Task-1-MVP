@@ -464,7 +464,7 @@ def local_test() -> None:
 
 if __name__ == "__main__":
     try:
-        local_test()
+        main()
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, exiting gracefully...")
     except Exception as e:
