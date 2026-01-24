@@ -35,7 +35,7 @@ class OakDCamera:
         # Properties
         cam_rgb.setPreviewSize(width, height)
         cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
-        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
         cam_rgb.setInterleaved(False)
         cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         

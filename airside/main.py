@@ -10,6 +10,7 @@ This module handles:
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Optional, Literal
 
@@ -299,8 +300,12 @@ def main() -> None:
     }
 
     # Create HUD display windows
-    for config in camera_configs.values():
-        cv2.namedWindow(config.window_name, cv2.WINDOW_NORMAL)
+    use_gui = os.environ.get("DISPLAY") is not None
+    if use_gui:
+        for config in camera_configs.values():
+            cv2.namedWindow(config.window_name, cv2.WINDOW_NORMAL)
+    else:
+        logging.info("Running in headless mode (no DISPLAY detected), GUI disabled")
 
     is_building_record_mode = True
     recorded_resource = False
@@ -354,14 +359,19 @@ def main() -> None:
                     corner_count=corner_count,
                     error_threshold_px=ERROR_RADIUS_PX,
                 )
-                cv2.imshow(config.window_name, hud_frame)
+                if use_gui:
+                    cv2.imshow(config.window_name, hud_frame)
 
         # Process keyboard input (required for cv2.imshow to work)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            logging.info("'q' pressed, exiting...")
-            break
-
+        if use_gui:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                logging.info("'q' pressed, exiting...")
+                break
+        else:
+            # Add a small sleep to prevent 100% CPU usage in headless mode
+            import time
+            time.sleep(0.01)
 
 def local_test() -> None:
     """Single-camera test for testing on local environments."""
@@ -472,5 +482,8 @@ if __name__ == "__main__":
         raise
     finally:
         # Clean up cv2 windows
-        cv2.destroyAllWindows()
-        logging.info("HUD windows closed")
+        try:
+            cv2.destroyAllWindows()
+            logging.info("HUD windows closed")
+        except:
+            pass
