@@ -1,4 +1,4 @@
 opencv-python
 numpy
-picamera2
+depthai
 pymavlink

@@ -45,7 +45,7 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
-        mode: Literal["rpi", "webcam", "sim", "dummy"] = "rpi",
+        mode: Literal["rpi", "webcam", "oakd", "sim", "dummy"] = "rpi",
         mav_comm=None,
     ) -> None:
         """
@@ -65,6 +65,9 @@ class Camera:
         self.auto_exposure_enabled = auto_exposure
         self.mode = mode
         self._camera: BaseCameraDevice | None = None
+        self._oakd_pipeline = None
+        self._oakd_device = None
+        self._oakd_queue = None
         self._mav_comm = mav_comm
         print("mode", self.mode)
 
@@ -98,6 +101,40 @@ class Camera:
                 logging.error(f"picam2 camera {self.camera_index} failed to initialize")
 
             return status
+        elif self.mode == "oakd":
+            print("Attempting to initialize Oak-D camera")
+            try:
+                import depthai as dai
+                
+                # Create pipeline
+                pipeline = dai.Pipeline()
+                
+                # Create color camera node
+                cam = pipeline.createColorCamera()
+                cam.setPreviewSize(500, 500)
+                cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+                cam.setInterleaved(False)
+                cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+                
+                # Configure for IR beacon detection (similar to picam2 settings)
+                cam.setManualExposure(self.exposure_time, self.analogue_gain * 1000)  # Convert to ISO
+                cam.setAutoExposureEnable(False)
+                
+                # Create output node
+                xout = pipeline.createXLinkOut()
+                xout.setStreamName("preview")
+                cam.preview.link(xout.input)
+                
+                # Store pipeline for frame capture
+                self._oakd_pipeline = pipeline
+                self._oakd_device = None  # Will be initialized in capture_frame
+                
+                logging.info(f"Oak-D camera {self.camera_index} initialized successfully")
+                return True
+                
+            except Exception as e:
+                logging.error(f"Oak-D camera {self.camera_index} failed to initialize: {e}")
+                return False
         elif self.mode == "webcam":
             print("Attempting to annitialize webcam camera")
             from warg_common.camera.camera_opencv import ConfigOpenCV
@@ -182,7 +219,25 @@ class Camera:
         """
         Capture a single frame from the camera.
         """
-        if self._camera is not None:
+        if self.mode == "oakd" and self._oakd_pipeline is not None:
+            try:
+                import depthai as dai
+                
+                # Initialize device if not already done
+                if self._oakd_device is None:
+                    self._oakd_device = dai.Device(self._oakd_pipeline)
+                    self._oakd_queue = self._oakd_device.getOutputQueue(name="preview", maxSize=4, blocking=False)
+                
+                # Get frame from queue
+                preview = self._oakd_queue.get()
+                frame = preview.getCvFrame()
+                
+                return frame
+                
+            except Exception as e:
+                logging.error(f"Failed to capture Oak-D frame: {e}")
+                return None
+        elif self._camera is not None:
             # Update simulation camera position from MAVLink
             if self.mode == "sim":
                 from warg_common.simulator.coordinates import GPSCoord
@@ -216,11 +271,28 @@ class Camera:
         """
         Check if camera is initialized.
         """
+        if self.mode == "oakd":
+            return self._oakd_pipeline is not None
         return self._camera is not None
+
+    def cleanup(self):
+        """Clean up camera resources."""
+        if self.mode == "oakd" and self._oakd_device is not None:
+            try:
+                self._oakd_device.close()
+                self._oakd_device = None
+                self._oakd_queue = None
+                logging.info("Oak-D camera resources cleaned up")
+            except Exception as e:
+                logging.error(f"Error cleaning up Oak-D camera: {e}")
 
     def __enter__(self) -> "Camera":
         """Context manager entry - allows use with 'with' statement."""
         return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - clean up resources."""
+        self.cleanup()
 
     def find_targets(self, frame: np.ndarray) -> List[TargetDetection]:
         """

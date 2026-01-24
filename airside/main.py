@@ -275,13 +275,13 @@ def main() -> None:
 
     mav_comm = MavlinkComm()
     building = Building()
-
+    
     # Initialize camera configurations
     # Camera 0: Down-facing (for building recording/mapping and roof targets)
     # Camera 1: Forward-facing (for target detection on walls)
     camera_configs = {
         "DOWN": CameraConfig(
-            camera=Camera(camera_index=0),
+            camera=Camera(camera_index=0, mode="oakd"),
             hud_state=HudState(),
             window_name="Down Camera",
             label="DOWN",
@@ -289,7 +289,7 @@ def main() -> None:
             channel=RESOURCE_RECORD_CHANNEL_A,
         ),
         "FORWARD": CameraConfig(
-            camera=Camera(camera_index=1),
+            camera=Camera(camera_index=1, mode="oakd"),
             hud_state=HudState(),
             window_name="Forward Camera",
             label="FORWARD",
@@ -361,6 +361,14 @@ def main() -> None:
         if key == ord("q"):
             logging.info("'q' pressed, exiting...")
             break
+    
+    # Clean up camera resources
+    for config in camera_configs.values():
+        config.camera.cleanup()
+    
+    # Clean up cv2 windows
+    cv2.destroyAllWindows()
+    logging.info("HUD windows closed")
 
 
 def local_test() -> None:
