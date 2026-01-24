@@ -12,10 +12,58 @@ import cv2
 import logging
 import time
 from typing import Literal, List, Tuple
+import depthai as dai
 
 from warg_common.simulator import SimCamera
 
 from util import Colour, Colours
+
+
+class OakDCamera:
+    """
+    Wrapper for Luxonis OAK-D camera to match BaseCameraDevice interface.
+    """
+    def __init__(self, width=640, height=480):
+        self.pipeline = dai.Pipeline()
+        
+        # Define source and output
+        cam_rgb = self.pipeline.create(dai.node.ColorCamera)
+        xout_rgb = self.pipeline.create(dai.node.XLinkOut)
+        
+        xout_rgb.setStreamName("rgb")
+        
+        # Properties
+        cam_rgb.setPreviewSize(width, height)
+        cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        cam_rgb.setInterleaved(False)
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        
+        # Linking
+        cam_rgb.preview.link(xout_rgb.input)
+        
+        # Connect to device and start pipeline
+        self.device = dai.Device(self.pipeline)
+        self.q_rgb = self.device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+        
+    def run(self) -> Tuple[bool, np.ndarray | None]:
+        """
+        Get the next frame.
+        Returns: (success, frame)
+        """
+        # blocking get() to ensure we wait for a frame
+        try:
+            in_rgb = self.q_rgb.get() 
+            if in_rgb is not None:
+                return True, in_rgb.getCvFrame()
+        except RuntimeError:
+            return False, None
+            
+        return False, None
+
+    def close(self):
+        if self.device:
+            self.device.close()
 
 
 @dataclass
@@ -45,7 +93,7 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
-        mode: Literal["rpi", "webcam", "sim", "dummy"] = "rpi",
+        mode: Literal["rpi", "webcam", "sim", "dummy", "oakd"] = "rpi",
         mav_comm=None,
     ) -> None:
         """
@@ -115,6 +163,18 @@ class Camera:
             else:
                 logging.error(f"opencv camera {self.camera_index} failed to initialize")
             return status
+        elif self.mode == "oakd":
+            print("Attempting to initialize oakd camera")
+            try:
+                # Initialize OAK-D camera
+                # We ignore camera_index for now as we assume single OAK-D unit
+                # but we could use it to select device if multiple are present
+                self._camera = OakDCamera(width=640, height=480)
+                logging.info(f"oakd camera initialized successfully")
+                return True
+            except Exception as e:
+                logging.error(f"oakd camera failed to initialize: {e}")
+                return False
         else:
             # sim
             from warg_common.simulator.world import create_demo_world
@@ -182,6 +242,9 @@ class Camera:
         """
         Capture a single frame from the camera.
         """
+        if self.mode == "dummy":
+            return None
+
         if self._camera is not None:
             # Update simulation camera position from MAVLink
             if self.mode == "sim":

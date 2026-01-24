@@ -281,7 +281,7 @@ def main() -> None:
     # Camera 1: Forward-facing (for target detection on walls)
     camera_configs = {
         "DOWN": CameraConfig(
-            camera=Camera(camera_index=0),
+            camera=Camera(camera_index=0, mode="dummy"),
             hud_state=HudState(),
             window_name="Down Camera",
             label="DOWN",
@@ -289,7 +289,7 @@ def main() -> None:
             channel=RESOURCE_RECORD_CHANNEL_A,
         ),
         "FORWARD": CameraConfig(
-            camera=Camera(camera_index=1),
+            camera=Camera(camera_index=1, mode="oakd"),
             hud_state=HudState(),
             window_name="Forward Camera",
             label="FORWARD",
