@@ -1,7 +1,7 @@
 """
-Camera module for handling Picamera2 operations.
+Camera module for handling OAK-D operations.
 
-This module provides a Camera class that handles Raspberry Pi Camera Module 2
+This module provides a Camera class that handles Luxonis OAK-D camera
 operations, including initialization and frame capture.
 """
 
@@ -16,6 +16,7 @@ from typing import Literal, List, Tuple
 from warg_common.simulator import SimCamera
 
 from util import Colour, Colours
+import depthai as dai
 
 
 @dataclass
@@ -29,9 +30,65 @@ class TargetDetection:
     contour: np.ndarray = None  # OpenCV contour for visualization
 
 
+class OakDCameraDevice:
+    def __init__(self, camera_index: int, exposure_time: int, analogue_gain: float):
+        self.pipeline = dai.Pipeline()
+
+        # Define source and output
+        cam_rgb = self.pipeline.create(dai.node.ColorCamera)
+        xout_video = self.pipeline.create(dai.node.XLinkOut)
+
+        xout_video.setStreamName("video")
+
+        # Properties
+        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)  # RGB
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        cam_rgb.setVideoSize(640, 480)
+        cam_rgb.setInterleaved(False)
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+
+        # Apply basic exposure/gain settings if provided
+        # OAK-D sensitivity is ISO. Mapping gain to ISO (approx 100 * gain)
+        # Exposure is in microseconds
+        if exposure_time > 0 and analogue_gain > 0:
+            iso = int(analogue_gain * 100)
+            # Clamp ISO to valid range (usually 100-1600)
+            iso = max(100, min(1600, iso))
+            cam_rgb.initialControl.setManualExposure(exposure_time, iso)
+
+        cam_rgb.video.link(xout_video.input)
+
+        # Device selection
+        devices = dai.Device.getAllAvailableDevices()
+        if len(devices) > camera_index:
+            device_info = devices[camera_index]
+            self.device = dai.Device(self.pipeline, device_info)
+            logging.info(f"Initialized OAK-D device {camera_index} (MxId: {device_info.getMxId()})")
+        else:
+            if len(devices) > 0:
+                 logging.warning(f"Camera index {camera_index} out of range, using first available device")
+                 self.device = dai.Device(self.pipeline)
+            else:
+                 # Attempt to open any device (will likely fail if none, or wait for one)
+                 logging.info("No explicit devices found, attempting to open default OAK-D device")
+                 self.device = dai.Device(self.pipeline)
+
+        self.q_video = self.device.getOutputQueue(name="video", maxSize=1, blocking=False)
+
+    def run(self) -> Tuple[bool, np.ndarray | None]:
+        in_video = self.q_video.tryGet()
+        if in_video is not None:
+            return True, in_video.getCvFrame()
+        return False, None
+
+    def close(self):
+        if self.device:
+            self.device.close()
+
+
 class Camera:
     """
-    Handles Raspberry Pi Camera Module 2 operations
+    Handles Camera operations (OAK-D, Webcam, or Sim)
     """
 
     # Default camera settings optimized for IR beacon detection
@@ -49,14 +106,14 @@ class Camera:
         mav_comm=None,
     ) -> None:
         """
-        Initialize and configure the Raspberry Pi Camera Module 2.
+        Initialize and configure the Camera.
 
         Args:
-            camera_index: Camera index (0 for first camera, 1 for second camera)
+            camera_index: Camera index
             exposure_time: Exposure time in microseconds
             analogue_gain: Analogue gain value
             auto_exposure: Enable/disable auto exposure
-            mode: Camera mode (rpi, webcam, sim)
+            mode: Camera mode (rpi=OAK-D, webcam, sim)
             mav_comm: MavlinkComm instance (required for sim mode)
         """
         self.camera_index = camera_index
@@ -64,7 +121,7 @@ class Camera:
         self.analogue_gain = analogue_gain
         self.auto_exposure_enabled = auto_exposure
         self.mode = mode
-        self._camera: BaseCameraDevice | None = None
+        self._camera = None
         self._mav_comm = mav_comm
         print("mode", self.mode)
 
@@ -80,24 +137,21 @@ class Camera:
         """
         Initialize camera hardware and apply settings.
         """
-        # Initialize Raspberry Pi Camera Module 2 with specified camera index
+        # Initialize OAK-D (formerly rpi/picam2)
         if self.mode == "rpi":
-            print("Attempting to initialize rpi camera")
-            from warg_common.camera.camera_picamera2 import ConfigPiCamera2
-
-            config = ConfigPiCamera2(
-                exposure_time=self.exposure_time, analogue_gain=self.analogue_gain
-            )
-            status, obj = create_camera(CameraOption.PICAM2, 500, 500, config)
-            self._camera = obj
-            if status:
-                logging.info(
-                    f"picam2 camera {self.camera_index} initialized successfully"
+            print(f"Attempting to initialize OAK-D camera (index {self.camera_index})")
+            try:
+                self._camera = OakDCameraDevice(
+                    self.camera_index,
+                    self.exposure_time,
+                    self.analogue_gain
                 )
-            else:
-                logging.error(f"picam2 camera {self.camera_index} failed to initialize")
+                logging.info(f"OAK-D camera {self.camera_index} initialized successfully")
+                return True
+            except Exception as e:
+                logging.error(f"OAK-D camera {self.camera_index} failed to initialize: {e}")
+                return False
 
-            return status
         elif self.mode == "webcam":
             print("Attempting to annitialize webcam camera")
             from warg_common.camera.camera_opencv import ConfigOpenCV
@@ -205,9 +259,10 @@ class Camera:
 
             status, frame = self._camera.run()
             if not status:
-                logging.warning(
-                    "Failed frame capture due to camera implementation or timeout"
-                )
+                # OAK-D might not always return a frame if queue is empty (non-blocking)
+                # This is normal, so logging warning every time might be noisy.
+                # However, for compat with other cams, let's keep it but maybe downgrade log level if needed.
+                pass
             return frame
         logging.warning("Attempted to capture frame with initialized camera device")
         return None
@@ -228,7 +283,7 @@ class Camera:
         Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
-            logging.warning("Invalid frame provided to colour_in_frame method")
+            # logging.warning("Invalid frame provided to colour_in_frame method")
             return []
 
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
