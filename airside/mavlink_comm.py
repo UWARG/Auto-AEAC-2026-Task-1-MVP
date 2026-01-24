@@ -45,7 +45,7 @@ class MavlinkComm:
         """Establish MAVLink connection to drone via serial port."""
         try:
             self.mav = mavutil.mavlink_connection(
-                "tcp:10.31.12.224:5762",
+                "tcp:192.168.196.67:5762",
                 baud=57600,
                 source_component=AIRSIDE_COMPONENT_ID,
                 source_system=1,

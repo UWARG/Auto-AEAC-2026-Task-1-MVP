@@ -26,6 +26,7 @@ class TargetDetection:
     circularity: float
     coverage: float
     area: float
+    contour: np.ndarray = None  # OpenCV contour for visualization
 
 
 class Camera:
@@ -221,9 +222,7 @@ class Camera:
         """Context manager entry - allows use with 'with' statement."""
         return self
 
-    def find_targets(
-        self, frame: np.ndarray
-    ) -> List[Tuple[Tuple[float, float], Colour | None]]:
+    def find_targets(self, frame: np.ndarray) -> List[TargetDetection]:
         """
         Detect colored circular targets in the frame.
         Returns the color of the circular target closest to the frame center.
@@ -234,9 +233,6 @@ class Camera:
 
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # Track the closest circular target to frame center
-        min_distance = float("inf")
-        detected_colour = None
         targets = []
 
         for colour in [c.value for c in Colours]:
@@ -277,7 +273,13 @@ class Camera:
                 center_y = moments["m01"] / moments["m00"]
                 targets.append(
                     TargetDetection(
-                        colour, center_x, center_y, circularity, fill_ratio, area
+                        colour,
+                        center_x,
+                        center_y,
+                        circularity,
+                        fill_ratio,
+                        area,
+                        contour,
                     )
                 )
 
@@ -302,7 +304,7 @@ class Camera:
 
     def is_valid_target(self, target: TargetDetection) -> bool:
         # Thresholds for detection
-        MIN_AREA = 100  # Minimum contour area in pixels
+        MIN_AREA = 300  # Minimum contour area in pixels
         MIN_CIRCULARITY = 0.6  # Circularity threshold (1.0 = perfect circle)
         MIN_FILL_RATIO = 0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
         return not (

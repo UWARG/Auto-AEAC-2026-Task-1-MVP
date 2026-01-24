@@ -11,6 +11,7 @@ Use up/down arrows to scroll through multiple detections per frame.
 
 import pickle
 import cv2
+import numpy as np
 import sys
 
 sys.path.insert(0, "airside")
@@ -20,6 +21,7 @@ from camera import Camera, TargetDetection
 viewer_state = {
     "current_frame": None,
     "hsv_info": None,  # (x, y, h, s, v) or None
+    "show_contour": False,  # Toggle contour view with 't'
 }
 
 
@@ -34,19 +36,25 @@ def mouse_callback(event, x, y, flags, param):
             print(f"Clicked ({x}, {y}) -> HSV: ({h}, {s}, {v})")
 
 
-def draw_crosshair(frame, x: int, y: int, color=(0, 255, 0), size: int = 20, thickness: int = 2):
+def draw_crosshair(
+    frame, x: int, y: int, color=(0, 255, 0), size: int = 20, thickness: int = 2
+):
     """Draw a crosshair at the specified position."""
     cv2.line(frame, (x - size, y), (x + size, y), color, thickness)
     cv2.line(frame, (x, y - size), (x, y + size), color, thickness)
     cv2.circle(frame, (x, y), 5, color, -1)
 
 
-def draw_text_box(frame, text: str, position: tuple[int, int] = (10, 30), font_scale: float = 0.6):
+def draw_text_box(
+    frame, text: str, position: tuple[int, int] = (10, 30), font_scale: float = 0.6
+):
     """Draw a text box with background."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     thickness = 2
 
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text, font, font_scale, thickness
+    )
 
     x, y = position
     padding = 5
@@ -56,7 +64,7 @@ def draw_text_box(frame, text: str, position: tuple[int, int] = (10, 30), font_s
         (x - padding, y - text_height - padding),
         (x + text_width + padding, y + baseline + padding),
         (0, 0, 0),
-        -1
+        -1,
     )
     cv2.putText(frame, text, (x, y), font, font_scale, (255, 255, 255), thickness)
 
@@ -97,11 +105,11 @@ def main():
         frame = frames[index]
         detections = camera.find_targets(frame)
         # Filter out tiny detections
-        detections = [d for d in detections if d.area >= 5]
+        detections = [d for d in detections if d.area >= 200 and d.circularity > 0.4]
         detection_cache[index] = detections
         return detections
 
-    window_name = "Frame Viewer - Left/Right: frames, Up/Down: detections, Click: HSV, Q: quit"
+    window_name = "Frame Viewer - Left/Right: frames, Up/Down: detections, T: contour, Click: HSV, Q: quit"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, mouse_callback)
 
@@ -122,7 +130,9 @@ def main():
         # Draw all detections as small markers
         for i, det in enumerate(detections):
             is_valid = camera.is_valid_target(det)
-            marker_color = (0, 255, 0) if is_valid else (0, 0, 255)  # Green if valid, red if not
+            marker_color = (
+                (0, 255, 0) if is_valid else (0, 0, 255)
+            )  # Green if valid, red if not
             cv2.circle(frame, (int(det.x), int(det.y)), 8, marker_color, 2)
 
         # Draw info for selected detection
@@ -139,11 +149,17 @@ def main():
             # Draw detection info
             y_offset = 30
             valid_str = "VALID" if is_valid else "INVALID"
-            draw_text_box(frame, f"Detection {current_detection_index + 1}/{len(detections)} [{valid_str}]", (10, y_offset))
+            draw_text_box(
+                frame,
+                f"Detection {current_detection_index + 1}/{len(detections)} [{valid_str}]",
+                (10, y_offset),
+            )
             y_offset += 30
             draw_text_box(frame, f"Colour: {det.colour.name}", (10, y_offset))
             y_offset += 30
-            draw_text_box(frame, f"Position: ({det.x:.1f}, {det.y:.1f})", (10, y_offset))
+            draw_text_box(
+                frame, f"Position: ({det.x:.1f}, {det.y:.1f})", (10, y_offset)
+            )
             y_offset += 30
             draw_text_box(frame, f"Area: {det.area:.1f} px", (10, y_offset))
             y_offset += 30
@@ -161,30 +177,52 @@ def main():
         if viewer_state["hsv_info"] is not None:
             px, py, h, s, v = viewer_state["hsv_info"]
             hsv_text = f"HSV at ({px},{py}): H={h} S={s} V={v}"
-            draw_text_box(frame, hsv_text, (frame.shape[1] - 300, 30))
+            draw_text_box(frame, hsv_text, (frame.shape[1] - 380, 30))
             # Draw small marker at clicked position
             cv2.circle(frame, (px, py), 3, (255, 0, 255), -1)
 
-        cv2.imshow(window_name, frame)
+        # Show contour view if toggled and there's a selected detection with contour
+        if viewer_state["show_contour"] and detections:
+            det = detections[current_detection_index]
+            if det.contour is not None:
+                # Create black and white contour image
+                contour_img = np.zeros(original_frame.shape[:2], dtype=np.uint8)
+                cv2.drawContours(contour_img, [det.contour], -1, 255, -1)
+                # Convert to BGR for display
+                contour_display = cv2.cvtColor(contour_img, cv2.COLOR_GRAY2BGR)
+                draw_text_box(
+                    contour_display, f"Contour View - {det.colour.name}", (10, 30)
+                )
+                cv2.imshow(window_name, contour_display)
+            else:
+                cv2.imshow(window_name, frame)
+        else:
+            cv2.imshow(window_name, frame)
 
         key = cv2.waitKey(50) & 0xFF  # 50ms timeout to allow mouse click updates
 
         if key == 255:  # No key pressed (timeout)
             continue
-        elif key == ord('q') or key == 27:  # Q or ESC to quit
+        elif key == ord("q") or key == 27:  # Q or ESC to quit
             break
-        elif key == 81 or key == 2 or key == ord('a'):  # Left arrow or A
+        elif key == 81 or key == 2 or key == ord("a"):  # Left arrow or A
             current_frame_index = (current_frame_index - 1) % len(frames)
-        elif key == 83 or key == 3 or key == ord('d'):  # Right arrow or D
+        elif key == 83 or key == 3 or key == ord("d"):  # Right arrow or D
             current_frame_index = (current_frame_index + 1) % len(frames)
-        elif key == 82 or key == 0 or key == ord('w'):  # Up arrow or W
+        elif key == 82 or key == 0 or key == ord("w"):  # Up arrow or W
             if detections:
-                current_detection_index = (current_detection_index - 1) % len(detections)
-        elif key == 84 or key == 1 or key == ord('s'):  # Down arrow or S
+                current_detection_index = (current_detection_index - 1) % len(
+                    detections
+                )
+        elif key == 84 or key == 1 or key == ord("s"):  # Down arrow or S
             if detections:
-                current_detection_index = (current_detection_index + 1) % len(detections)
-        elif key == ord('c'):  # C to clear HSV marker
+                current_detection_index = (current_detection_index + 1) % len(
+                    detections
+                )
+        elif key == ord("c"):  # C to clear HSV marker
             viewer_state["hsv_info"] = None
+        elif key == ord("t"):  # T to toggle contour view
+            viewer_state["show_contour"] = not viewer_state["show_contour"]
 
     cv2.destroyAllWindows()
     print("Viewer closed")

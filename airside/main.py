@@ -114,19 +114,19 @@ def process_target_locking(
     img_center_x = frame.shape[1] // 2  # Horizontal center (width / 2)
     img_center_y = frame.shape[0] // 2  # Vertical center (height / 2)
 
-    target_colour = camera_config.camera.colour_in_frame(frame)
+    target = camera_config.camera.get_best_target(
+        camera_config.camera.find_targets(frame)
+    )
 
-    # Update HUD state with detected color
-    hud_state.target_colour = target_colour
-
-    # Early return if no target color detected
-    if target_colour is None:
+    if target is None:
         logging.debug(f"{camera_name} camera - No target colour detected")
         hud_state.reset()
         return recorded_resource
 
-    target_center = camera_config.camera.center_of_target_in_frame(frame, target_colour)
+    # Update HUD state with detected color
+    hud_state.target_colour = target.colour
 
+    target_center = (int(target.x), int(target.y))
     if target_center:
         target_center_x, target_center_y = target_center
 
@@ -138,7 +138,7 @@ def process_target_locking(
         # Update HUD state with target tracking data
         hud_state.update_target(
             center=target_center,
-            colour=target_colour,
+            colour=target.colour,
             offset_x=float(offset_x),
             offset_y=float(offset_y),
             error=float(error),
@@ -178,12 +178,12 @@ def process_target_locking(
 
             logging.info(
                 f"{camera_name} camera - Lock achieved! Error: {error:.2f} px <= {ERROR_RADIUS_PX} px. "
-                f"Sending target at {target_position} (colour: {target_colour.name}) to ground station"
+                f"Sending target at {target_position} (colour: {target.colour.name}) to ground station"
             )
 
             velocity = Vector3d(0, 0, 0)
             mav_comm.set_body_velocity(velocity)
-            mav_comm.send_target_to_ground(target_position, target_colour)
+            mav_comm.send_target_to_ground(target_position, target.colour)
 
             # Update HUD state for lock
             hud_state.update_velocity(velocity)
@@ -307,7 +307,6 @@ def main() -> None:
 
     while True:
         # Capture frames from all cameras
-        logging.info("bong")
         frames = {
             label: config.camera.capture_frame()
             for label, config in camera_configs.items()
