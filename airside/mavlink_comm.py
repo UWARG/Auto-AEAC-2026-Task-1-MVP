@@ -30,7 +30,7 @@ class MavlinkComm:
         self.heading: float | None = None
 
         self.rc_channels: dict[int, RCChannel] = {
-            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(7, 10)
+            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(7, 11)
         }
 
         while not self.__mavlink_connect():
@@ -238,3 +238,187 @@ class MavlinkComm:
         except Exception as e:
             logging.error(f"Failed to send building info to ground: {e}")
             self.send_building_info_to_ground(building, attempt + 1)
+
+    def set_waypoint(self, coordinate: Coordinate, attempt: int = 0) -> bool:
+        """
+        Set a waypoint for the drone to navigate to.
+
+        Args:
+            coordinate: Target waypoint location (lat, lon, alt)
+            attempt: Retry attempt number (internal use)
+
+        Returns:
+            True if waypoint command sent successfully, False otherwise
+        """
+        if attempt > 3:
+            logging.error("Failed to set waypoint after 3 attempts")
+            return False
+
+        try:
+            # Convert coordinates to MAVLink format (degrees * 1e7 for lat/lon, mm for alt)
+            lat_int = int(coordinate.lat * 1e7)
+            lon_int = int(coordinate.lon * 1e7)
+            alt_int = int(coordinate.alt * 1000)  # Convert meters to mm
+
+            # Use SET_POSITION_TARGET_GLOBAL_INT for waypoint navigation
+            # https://ardupilot.org/dev/docs/copter-commands-in-guided-mode.html
+            timestamp = int(self.mav.time_since("SYSTEM_TIME") * 1e6)
+            type_mask = 0b110111111000  # Type mask: enable position (disable velocity, accel, etc.)
+            frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+
+            self.mav.mav.set_position_target_global_int_send(
+                timestamp,
+                self.mav.target_system,
+                self.mav.target_component,
+                frame,
+                type_mask,
+                lat_int,
+                lon_int,
+                alt_int,
+                0,  # Velocity X (unused)
+                0,  # Velocity Y (unused)
+                0,  # Velocity Z (unused)
+                0,  # Acceleration X (unused)
+                0,  # Acceleration Y (unused)
+                0,  # Acceleration Z (unused)
+                0,  # Yaw (unused, maintain current)
+                0,  # Yaw rate (unused)
+            )
+
+            logging.info(f"Waypoint set to {coordinate}")
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to set waypoint: {e}")
+            self.set_waypoint(coordinate, attempt + 1)
+            return False
+
+    def activate_extinguish(self, duration: float = 2.0, attempt: int = 0) -> bool:
+        """
+        Activate extinguishing mechanism via servo control.
+
+        This assumes a servo is connected to control the extinguishing mechanism.
+        The servo channel and PWM values should be configured based on hardware setup.
+
+        Args:
+            duration: How long to keep extinguishing mechanism active (seconds)
+            attempt: Retry attempt number (internal use)
+
+        Returns:
+            True if servo command sent successfully, False otherwise
+        """
+        if attempt > 3:
+            logging.error("Failed to activate extinguishing mechanism after 3 attempts")
+            return False
+
+        try:
+            # Servo channel for extinguishing mechanism (adjust based on hardware)
+            # Channel 10 is commonly used for auxiliary functions
+            EXTINGUISH_SERVO_CHANNEL = 10
+
+            # PWM values (microseconds)
+            # These values depend on your servo setup - adjust as needed
+            SERVO_OFF_PWM = 1500  # Neutral/off position
+            SERVO_ON_PWM = 2000  # Active/extinguishing position
+
+            # Set servo to active position
+            self.mav.mav.command_long_send(
+                self.mav.target_system,
+                self.mav.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                0,  # Confirmation
+                EXTINGUISH_SERVO_CHANNEL,  # Servo channel
+                SERVO_ON_PWM,  # PWM value (microseconds)
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+            )
+
+            logging.info(
+                f"Extinguishing mechanism activated on channel {EXTINGUISH_SERVO_CHANNEL} "
+                f"for {duration}s"
+            )
+
+            # Note: The servo will remain active until we send the OFF command
+            # The duration is handled by the calling code
+
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to activate extinguishing mechanism: {e}")
+            self.activate_extinguish(duration, attempt + 1)
+            return False
+
+    def deactivate_extinguish(self, attempt: int = 0) -> bool:
+        """
+        Deactivate extinguishing mechanism by returning servo to neutral position.
+
+        Args:
+            attempt: Retry attempt number (internal use)
+
+        Returns:
+            True if servo command sent successfully, False otherwise
+        """
+        if attempt > 3:
+            logging.error("Failed to deactivate extinguishing mechanism after 3 attempts")
+            return False
+
+        try:
+            EXTINGUISH_SERVO_CHANNEL = 10
+            SERVO_OFF_PWM = 1500  # Neutral/off position
+
+            self.mav.mav.command_long_send(
+                self.mav.target_system,
+                self.mav.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                0,  # Confirmation
+                EXTINGUISH_SERVO_CHANNEL,  # Servo channel
+                SERVO_OFF_PWM,  # PWM value (microseconds)
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+                0,  # Unused
+            )
+
+            logging.info(f"Extinguishing mechanism deactivated on channel {EXTINGUISH_SERVO_CHANNEL}")
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to deactivate extinguishing mechanism: {e}")
+            self.deactivate_extinguish(attempt + 1)
+            return False
+
+    def send_extinguish_status_to_ground(
+        self, target, success: bool, attempt: int = 0
+    ) -> None:
+        """
+        Send extinguishing status to ground station.
+
+        Args:
+            target: Target object that was extinguished (or failed)
+            success: True if extinguished successfully, False if failed
+            attempt: Retry attempt number (internal use)
+        """
+        if attempt > 3:
+            logging.error("Failed to send extinguish status to ground after 3 attempts")
+            return
+
+        try:
+            status_str = "SUCCESS" if success else "FAILED"
+            msg = (
+                f"e_{target.target_id}_{target.coordinate.lat}_{target.coordinate.lon}_"
+                f"{target.coordinate.alt}_{target.colour.name}_{status_str}"
+            )
+
+            self.mav.mav.statustext_send(
+                mavutil.mavlink.MAV_SEVERITY_INFO,  # Severity: informational
+                msg.encode(),
+            )
+
+            logging.info(f"Sent extinguish status to ground: {status_str} for target {target.target_id}")
+        except Exception as e:
+            logging.error(f"Failed to send extinguish status to ground: {e}")
+            self.send_extinguish_status_to_ground(target, success, attempt + 1)

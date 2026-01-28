@@ -6,6 +6,7 @@ This module handles:
 - Building corner and height recording
 - Target detection and auto-centering
 - Target coordinate transmission to ground station
+- Target extinguishing operations
 """
 
 import logging
@@ -17,6 +18,7 @@ from airside.building import Building
 from airside.camera import Camera
 from airside.mavlink_comm import MavlinkComm
 from airside.hud import HudState, overlay_hud
+from airside.extinguish import ExtinguishController
 from util import Coordinate, Vector3d
 
 # This proportional control gain determines how aggressively the drone moves
@@ -26,9 +28,13 @@ PX_TO_MS = 0.00002  # (m/s) per pixel
 MODE_CHANGE_CHANNEL = 7
 RESOURCE_RECORD_CHANNEL_A = 8
 RESOURCE_RECORD_CHANNEL_B = 9
+EXTINGUISH_MODE_CHANNEL = 10  # Channel to activate extinguishing mode
 
 # Target locking threshold: maximum allowed pixel error for successful lock
 ERROR_RADIUS_PX = 40  # pixels
+
+# Extinguishing configuration
+AUTO_QUEUE_TARGETS = True  # Automatically add detected targets to extinguishing queue
 
 
 def main() -> None:
@@ -53,7 +59,11 @@ def main() -> None:
     # Initialize building geometry manager
     building = Building()
 
+    # Initialize extinguishing controller
+    extinguish_controller = ExtinguishController(mav_comm)
+
     is_building_record_mode = True
+    is_extinguish_mode = False
     recorded_resource = False
 
     # HUD state tracking
@@ -224,6 +234,14 @@ def main() -> None:
                 velocity = Vector3d(0, 0, 0)
                 mav_comm.set_body_velocity(velocity)
                 mav_comm.send_target_to_ground(target_position, target_colour)
+
+                # Add target to extinguishing queue if auto-queue is enabled
+                if AUTO_QUEUE_TARGETS:
+                    extinguish_controller.add_target(target_position, target_colour)
+                    logging.info(
+                        f"Target added to extinguishing queue: {target_position} ({target_colour.name})"
+                    )
+
                 recorded_resource = True
 
                 # Update HUD state for lock
@@ -277,29 +295,66 @@ def main() -> None:
         while mav_comm.process_data_stream():
             pass
 
-        # Check mode switch (Channel 7)
+        # Check mode switches
         mode_channel_active = mav_comm.get_rc_channel(MODE_CHANGE_CHANNEL).is_active
+        extinguish_channel_active = mav_comm.get_rc_channel(EXTINGUISH_MODE_CHANNEL).is_active
 
-        # Send building info when transitioning from building mode to target mode
-        if is_building_record_mode and not mode_channel_active:
-            logging.info("Switching to target detection mode, sending building info")
-            mav_comm.send_building_info_to_ground(building)
+        # Extinguishing mode takes priority if active
+        if extinguish_channel_active:
+            if not is_extinguish_mode:
+                logging.info("Entering extinguishing mode")
+                is_extinguish_mode = True
+                # Get next target if available
+                if extinguish_controller.current_target is None:
+                    extinguish_controller.get_next_target()
 
-        # Update mode state
-        is_building_record_mode = mode_channel_active
+            # Process extinguishing
+            current_position = mav_comm.get_position()
+            status = extinguish_controller.process_current_target(current_position)
 
-        # Execute mode-specific functions
-        if is_building_record_mode:
-            building_record_functions()
+            if status == "complete" or status == "extinguished":
+                # Get next target
+                next_target = extinguish_controller.get_next_target()
+                if next_target is None:
+                    logging.info("No more targets to extinguish")
+                    # Could exit extinguishing mode here or wait for channel toggle
+                else:
+                    logging.info(f"Moving to next target: {next_target}")
+
+            # Update HUD with extinguishing status
+            extinguish_status = extinguish_controller.get_status()
+            logging.debug(f"Extinguish status: {extinguish_status}")
+
         else:
-            target_detection_functions(frame_down, frame_forward)
+            # Exiting extinguishing mode
+            if is_extinguish_mode:
+                logging.info("Exiting extinguishing mode")
+                is_extinguish_mode = False
+
+            # Send building info when transitioning from building mode to target mode
+            if is_building_record_mode and not mode_channel_active:
+                logging.info("Switching to target detection mode, sending building info")
+                mav_comm.send_building_info_to_ground(building)
+
+            # Update mode state
+            is_building_record_mode = mode_channel_active
+
+            # Execute mode-specific functions
+            if is_building_record_mode:
+                building_record_functions()
+            else:
+                target_detection_functions(frame_down, frame_forward)
 
         # Display HUD overlays
         if frame_down is not None and frame_down.size > 0:
-            mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"
-            corner_count = (
-                building.corner_record_cursor if is_building_record_mode else None
-            )
+            if is_extinguish_mode:
+                mode_str = "EXTINGUISH"
+                corner_count = None
+            else:
+                mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"
+                corner_count = (
+                    building.corner_record_cursor if is_building_record_mode else None
+                )
 
             hud_frame_down = overlay_hud(
                 frame=frame_down,
@@ -312,10 +367,14 @@ def main() -> None:
             cv2.imshow("Down Camera", hud_frame_down)
 
         if frame_forward is not None and frame_forward.size > 0:
-            mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"
-            corner_count = (
-                building.corner_record_cursor if is_building_record_mode else None
-            )
+            if is_extinguish_mode:
+                mode_str = "EXTINGUISH"
+                corner_count = None
+            else:
+                mode_str = "BUILDING_RECORD" if is_building_record_mode else "TARGET_DETECT"
+                corner_count = (
+                    building.corner_record_cursor if is_building_record_mode else None
+                )
 
             hud_frame_forward = overlay_hud(
                 frame=frame_forward,
