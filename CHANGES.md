@@ -61,8 +61,12 @@ This document tracks all significant changes made to the Auto-AEAC-2026-Task-1-M
   - Mode transitions are logged for debugging
 
 ### Note
+- **AIRSIDE IMPLEMENTATION COMPLETE** ✅
+- **GROUNDSIDE IMPLEMENTATION PENDING** ❌
 - Extinguish status messages are sent to ground station but not currently parsed by groundside
-- Groundside can be updated later to handle extinguish status messages if needed
+- Groundside implementation is planned for Task 2 MVP branch
+- See `TASK2_GROUNDSIDE_EXTINGUISH_IMPLEMENTATION.md` for complete implementation guide
+- See `IMPLEMENTATION_STATUS.md` for detailed status of all changes
 
 ### Message Protocol
 - **New MAVLink STATUSTEXT Format** (`airside/mavlink_comm.py`)

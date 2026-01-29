@@ -148,3 +148,5 @@ The extinguishing system automatically processes detected targets by navigating 
 ## See Also
 - `CHANGES.md` - Detailed changelog of all modifications
 - `GROUND_TESTING.md` - Ground testing procedures for detection system
+- `IMPLEMENTATION_STATUS.md` - Status of all extinguisher system changes
+- `TASK2_GROUNDSIDE_EXTINGUISH_IMPLEMENTATION.md` - Groundside implementation guide (Task 2 MVP)
