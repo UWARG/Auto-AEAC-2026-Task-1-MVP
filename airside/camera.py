@@ -45,7 +45,7 @@ class Camera:
         exposure_time: int = DEFAULT_EXPOSURE_TIME,
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
-        mode: Literal["rpi", "webcam", "sim", "dummy"] = "rpi",
+        mode: Literal["rpi", "webcam", "sim", "oakd", "dummy"] = "rpi",
         mav_comm=None,
     ) -> None:
         """
@@ -66,6 +66,10 @@ class Camera:
         self.mode = mode
         self._camera: BaseCameraDevice | None = None
         self._mav_comm = mav_comm
+        # OAK-D specific state
+        self._oakd_pipeline = None
+        self._oakd_current_frame = None
+        self._oakd_queue = None
         print("mode", self.mode)
 
         # Retry camera initialization
@@ -115,6 +119,22 @@ class Camera:
             else:
                 logging.error(f"opencv camera {self.camera_index} failed to initialize")
             return status
+        elif self.mode == "oakd":
+            print("Attempting to initialize OAK-D camera")
+            import depthai as dai
+
+            try:
+                self._oakd_pipeline = dai.Pipeline()
+                cam = self._oakd_pipeline.create(dai.node.Camera).build()
+                self._oakd_queue = cam.requestOutput(
+                    (640, 480), dai.ImgFrame.Type.BGR888p
+                ).createOutputQueue(maxSize=4, blocking=False)
+                self._oakd_pipeline.start()
+                logging.info(f"OAK-D camera initialized successfully")
+                return True
+            except Exception as e:
+                logging.error(f"OAK-D camera failed to initialize: {e}")
+                return False
         else:
             # sim
             from warg_common.simulator.world import create_demo_world
@@ -182,7 +202,21 @@ class Camera:
         """
         Capture a single frame from the camera.
         """
-        if self._camera is not None:
+        # OAK-D uses its own pipeline, not BaseCameraDevice
+        if self.mode == "oakd":
+            if self._oakd_queue is None:
+                logging.warning("OAK-D queue not initialized")
+                return None
+            frame_msg = None
+            if self._oakd_current_frame is None:
+                self._oakd_current_frame = self._oakd_queue.get()
+            else:
+                newframe = self._oakd_queue.tryGet()
+                if newframe is not None:
+                    self._oakd_current_frame = newframe
+            return self._oakd_current_frame.getCvFrame()
+
+        elif self._camera is not None:
             # Update simulation camera position from MAVLink
             if self.mode == "sim":
                 from warg_common.simulator.coordinates import GPSCoord
@@ -216,6 +250,8 @@ class Camera:
         """
         Check if camera is initialized.
         """
+        if self.mode == "oakd":
+            return self._oakd_pipeline is not None
         return self._camera is not None
 
     def __enter__(self) -> "Camera":

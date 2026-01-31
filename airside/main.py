@@ -388,7 +388,7 @@ def local_test() -> None:
             channel=RESOURCE_RECORD_CHANNEL_A,
         ),
         "FORWARD": CameraConfig(
-            camera=Camera(camera_index=1, mode="sim", mav_comm=mav_comm),
+            camera=Camera(camera_index=1, mode="oakd", mav_comm=mav_comm),
             hud_state=HudState(),
             window_name="Forward Camera",
             label="FORWARD",
