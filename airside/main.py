@@ -10,6 +10,7 @@ This module handles:
 
 import logging
 import math
+import pickle
 from dataclasses import dataclass
 from typing import Optional, Literal
 
@@ -28,6 +29,8 @@ PX_TO_MS = 0.004  # (m/s) per pixel
 MODE_CHANGE_CHANNEL = 7
 RESOURCE_RECORD_CHANNEL_A = 8
 RESOURCE_RECORD_CHANNEL_B = 6
+FRAME_CAPTURE_CHANNEL = 5
+GUI_ENABLED = False
 
 # Target locking threshold: maximum allowed pixel error for successful lock
 ERROR_RADIUS_PX = 5  # pixels
@@ -266,6 +269,12 @@ def handle_target_detection(
     return recorded_resource
 
 
+# store array of saved frames
+saved_frames = []
+previous_capture = False
+capture_file_counter = 1
+
+
 def main() -> None:
     """Main control loop for airside drone operations."""
     logging.basicConfig(
@@ -299,8 +308,9 @@ def main() -> None:
     }
 
     # Create HUD display windows
-    for config in camera_configs.values():
-        cv2.namedWindow(config.window_name, cv2.WINDOW_NORMAL)
+    if GUI_ENABLED:
+        for config in camera_configs.values():
+            cv2.namedWindow(config.window_name, cv2.WINDOW_NORMAL)
 
     is_building_record_mode = True
     recorded_resource = False
@@ -354,17 +364,21 @@ def main() -> None:
                     corner_count=corner_count,
                     error_threshold_px=ERROR_RADIUS_PX,
                 )
-                cv2.imshow(config.window_name, hud_frame)
+                if GUI_ENABLED:
+                    cv2.imshow(config.window_name, hud_frame)
 
         # Process keyboard input (required for cv2.imshow to work)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            logging.info("'q' pressed, exiting...")
-            break
+        if GUI_ENABLED:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                logging.info("'q' pressed, exiting...")
+                break
 
 
 def local_test() -> None:
     """Single-camera test for testing on local environments."""
+    global capture_file_counter
+    global previous_capture
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
@@ -442,9 +456,11 @@ def local_test() -> None:
             building.corner_record_cursor if is_building_record_mode else None
         )
 
+        frame_capture_signal = mav_comm.get_rc_channel(FRAME_CAPTURE_CHANNEL).is_active
         for label, config in camera_configs.items():
             frame = frames.get(label)
             if frame is not None and frame.size > 0:
+
                 hud_frame = overlay_hud(
                     frame=frame,
                     camera_label=config.label,
@@ -453,13 +469,28 @@ def local_test() -> None:
                     corner_count=corner_count,
                     error_threshold_px=ERROR_RADIUS_PX,
                 )
-                cv2.imshow(config.window_name, hud_frame)
 
-        # Process keyboard input (required for cv2.imshow to work)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            logging.info("'q' pressed, exiting...")
-            break
+                if frame_capture_signal and not previous_capture:
+                    saved_frames.append(hud_frame)
+
+                if GUI_ENABLED:
+                    cv2.imshow(config.window_name, hud_frame)
+
+        previous_capture = frame_capture_signal
+        if len(saved_frames) >= 10:
+            filename = f"captures{capture_file_counter}.frames"
+            with open(filename, "wb") as f:
+                pickle.dump(saved_frames, f)
+            logging.info(f"Saved {len(saved_frames)} frames to {filename}")
+            saved_frames.clear()
+            capture_file_counter += 1
+
+        if GUI_ENABLED:
+            # Process keyboard input (required for cv2.imshow to work)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                logging.info("'q' pressed, exiting...")
+                break
 
 
 if __name__ == "__main__":
@@ -472,5 +503,6 @@ if __name__ == "__main__":
         raise
     finally:
         # Clean up cv2 windows
-        cv2.destroyAllWindows()
-        logging.info("HUD windows closed")
+        if GUI_ENABLED:
+            cv2.destroyAllWindows()
+            logging.info("HUD windows closed")
