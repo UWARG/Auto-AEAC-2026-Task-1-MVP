@@ -10,8 +10,10 @@ This module handles:
 
 import logging
 import math
+import os
 import pickle
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional, Literal
 
 import cv2
@@ -272,7 +274,6 @@ def handle_target_detection(
 # store array of saved frames
 saved_frames = []
 previous_capture = False
-capture_file_counter = 1
 
 
 def main() -> None:
@@ -377,7 +378,6 @@ def main() -> None:
 
 def local_test() -> None:
     """Single-camera test for testing on local environments."""
-    global capture_file_counter
     global previous_capture
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -478,12 +478,13 @@ def local_test() -> None:
 
         previous_capture = frame_capture_signal
         if len(saved_frames) >= 10:
-            filename = f"captures{capture_file_counter}.frames"
+            os.makedirs("frames", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"frames/{timestamp}.frames"
             with open(filename, "wb") as f:
                 pickle.dump(saved_frames, f)
             logging.info(f"Saved {len(saved_frames)} frames to {filename}")
             saved_frames.clear()
-            capture_file_counter += 1
 
         if GUI_ENABLED:
             # Process keyboard input (required for cv2.imshow to work)

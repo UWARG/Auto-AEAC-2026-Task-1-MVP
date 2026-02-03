@@ -71,12 +71,16 @@ def draw_text_box(
 
 def main():
     # Load frames from pickle file
-    print("Loading frames from 'frames' pickle file...")
+    if len(sys.argv) < 2:
+        print("Usage: python frame_viewer.py <frames_file>")
+        return
+    frames_path = sys.argv[1]
+    print(f"Loading frames from '{frames_path}'...")
     try:
-        with open("frames", "rb") as f:
+        with open(frames_path, "rb") as f:
             frames = pickle.load(f)
     except FileNotFoundError:
-        print("Error: 'frames' file not found")
+        print(f"Error: '{frames_path}' not found")
         return
     except Exception as e:
         print(f"Error loading frames: {e}")
