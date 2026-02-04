@@ -461,6 +461,9 @@ def local_test() -> None:
             frame = frames.get(label)
             if frame is not None and frame.size > 0:
 
+                if frame_capture_signal and not previous_capture:
+                    saved_frames.append(frame)
+
                 hud_frame = overlay_hud(
                     frame=frame,
                     camera_label=config.label,
@@ -469,9 +472,6 @@ def local_test() -> None:
                     corner_count=corner_count,
                     error_threshold_px=ERROR_RADIUS_PX,
                 )
-
-                if frame_capture_signal and not previous_capture:
-                    saved_frames.append(hud_frame)
 
                 if GUI_ENABLED:
                     cv2.imshow(config.window_name, hud_frame)
