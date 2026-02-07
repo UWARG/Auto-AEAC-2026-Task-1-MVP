@@ -30,7 +30,7 @@ class MavlinkComm:
         self.heading: float | None = None
 
         self.rc_channels: dict[int, RCChannel] = {
-            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(1, 10)
+            i: RCChannel(channel=i, raw=0, is_active=False) for i in range(1, 20)
         }
 
         while not self.__mavlink_connect():

@@ -28,10 +28,10 @@ from util import Coordinate, Vector3d
 # to correct position errors. Smaller values = gentler, more stable movement
 PX_TO_MS = 0.004  # (m/s) per pixel
 
-MODE_CHANGE_CHANNEL = 7
-RESOURCE_RECORD_CHANNEL_A = 8
-RESOURCE_RECORD_CHANNEL_B = 6
-FRAME_CAPTURE_CHANNEL = 5
+MODE_CHANGE_CHANNEL = 11
+RESOURCE_RECORD_CHANNEL_A = 12
+RESOURCE_RECORD_CHANNEL_B = 13
+FRAME_CAPTURE_CHANNEL = 14
 GUI_ENABLED = False
 
 # Target locking threshold: maximum allowed pixel error for successful lock
@@ -460,7 +460,6 @@ def local_test() -> None:
         for label, config in camera_configs.items():
             frame = frames.get(label)
             if frame is not None and frame.size > 0:
-
                 if frame_capture_signal and not previous_capture:
                     saved_frames.append(frame)
 
