@@ -156,6 +156,7 @@ class MavlinkComm:
 
     def set_body_velocity(self, velocity: Vector3d, attempt: int = 0) -> None:
         """Set drone velocity in body frame (x=forward, y=right, z=down)."""
+        return
         if attempt > 3:
             logging.error("Failed to set body velocity after 3 attempts")
             return

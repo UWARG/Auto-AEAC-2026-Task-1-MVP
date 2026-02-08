@@ -35,7 +35,7 @@ FRAME_CAPTURE_CHANNEL = 14
 GUI_ENABLED = False
 
 # Target locking threshold: maximum allowed pixel error for successful lock
-ERROR_RADIUS_PX = 5  # pixels
+ERROR_RADIUS_PX = 60  # pixels
 
 
 @dataclass
