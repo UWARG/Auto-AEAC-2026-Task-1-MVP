@@ -28,10 +28,10 @@ from util import Coordinate, Vector3d
 # to correct position errors. Smaller values = gentler, more stable movement
 PX_TO_MS = 0.004  # (m/s) per pixel
 
-MODE_CHANGE_CHANNEL = 11
+MODE_CHANGE_CHANNEL = 14
 RESOURCE_RECORD_CHANNEL_A = 12
-RESOURCE_RECORD_CHANNEL_B = 13
-FRAME_CAPTURE_CHANNEL = 14
+RESOURCE_RECORD_CHANNEL_B = 11
+FRAME_CAPTURE_CHANNEL = 13
 GUI_ENABLED = False
 
 # Target locking threshold: maximum allowed pixel error for successful lock
