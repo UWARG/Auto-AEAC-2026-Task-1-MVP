@@ -100,7 +100,7 @@ def process_target_locking(
     camera_config: CameraConfig,
     mav_comm: MavlinkComm,
     building: Building,
-    recorded_resource: bool
+    recorded_resource: bool,
 ) -> bool:
     """
     Process target detection and locking for a specific camera.
@@ -192,7 +192,7 @@ def process_target_locking(
                 f"Sending target at {target_position} (colour: {target.colour.name}) to ground station"
             )
 
-            mav_comm.set_landing_target() # default angle is [0,0]
+            mav_comm.set_landing_target()  # default angle is [0,0]
             mav_comm.send_target_to_ground(target_position, target.colour)
             recorded_resource = True
 
@@ -208,12 +208,12 @@ def process_target_locking(
                     math.atan2(-offset_y, FOCAL_LENGTH_PX),
                 ]
             else:
-                """ 
-                i believe this still needs to be changed to reflect the fact that this is a forward facing camera. 
+                """
+                i believe this still needs to be changed to reflect the fact that this is a forward facing camera.
                 even if we used matrix math to change the angles, since the precision loiter
                 system expects angles relative to the down direction of the drone, i think it would just move
                 forwards/backwards and left/right rather than up/down and left/right.
-                    
+
                 setting PLND_ORIENT and PLND_YAW_ALIGN could fix this, but would require a reboot on change
                 """
                 angleOffset = [
@@ -238,11 +238,13 @@ def process_target_locking(
 
             # Update HUD state
             hud_state.set_locked(True)
-        # if target is not in the camera frame        
+        # if target is not in the camera frame
     else:
         if in_loiter:
             # Reset loiter state
-            in_loiter = not mav_comm.enter_guided() # right now it enters guided mode, might need to change depending on what pilots say
+            in_loiter = (
+                not mav_comm.enter_guided()
+            )  # right now it enters guided mode, might need to change depending on what pilots say
 
         logging.warning(f"{camera_name} camera - No target detected in frame")
         # Clear target HUD state
