@@ -1,9 +1,9 @@
 """
 Frame viewer for testing camera target detection.
 
-Loads frames from a pickle file and allows scrolling through them
-with left/right arrow keys. Lazily performs detection on the current frame
-and displays crosshair + detected colour.
+Loads frames from a pickle file (or all .frames files in a directory) and
+allows scrolling through them with left/right arrow keys. Lazily performs
+detection on the current frame and displays crosshair + detected colour.
 
 Click anywhere on the frame to see the HSV value at that pixel.
 Use up/down arrows to scroll through multiple detections per frame.
@@ -12,7 +12,9 @@ Use up/down arrows to scroll through multiple detections per frame.
 import pickle
 import cv2
 import numpy as np
+import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, "airside")
 from camera import Camera, TargetDetection
@@ -69,28 +71,76 @@ def draw_text_box(
     cv2.putText(frame, text, (x, y), font, font_scale, (255, 255, 255), thickness)
 
 
-def main():
-    # Load frames from pickle file
-    if len(sys.argv) < 2:
-        print("Usage: python frame_viewer.py <frames_file>")
-        return
-    frames_path = sys.argv[1]
-    print(f"Loading frames from '{frames_path}'...")
+def parse_timestamp(filename):
+    """Try to parse a timestamp from a .frames filename like 20260208_103012_356310.frames."""
+    basename = os.path.splitext(os.path.basename(filename))[0]
     try:
-        with open(frames_path, "rb") as f:
-            frames = pickle.load(f)
-    except FileNotFoundError:
-        print(f"Error: '{frames_path}' not found")
+        return datetime.strptime(basename, "%Y%m%d_%H%M%S_%f")
+    except ValueError:
+        return None
+
+
+def load_frames_from_file(path):
+    """Load frames from a single pickle file, returning (frames, labels) lists."""
+    filename = os.path.basename(path)
+    timestamp = parse_timestamp(path)
+    if timestamp:
+        label = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    else:
+        label = filename
+
+    with open(path, "rb") as f:
+        file_frames = pickle.load(f)
+
+    labels = [f"{label}  (frame {i}/{len(file_frames)})  [{filename}]" for i in range(1, len(file_frames) + 1)]
+    return file_frames, labels
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python frame_viewer.py <frames_file_or_directory>")
         return
-    except Exception as e:
-        print(f"Error loading frames: {e}")
-        return
+
+    frames_path = sys.argv[1]
+    frames = []
+    frame_labels = []
+
+    if os.path.isdir(frames_path):
+        # Load all .frames files in the directory, sorted by name (timestamp order)
+        files = sorted(
+            f for f in os.listdir(frames_path) if f.endswith(".frames")
+        )
+        if not files:
+            print(f"No .frames files found in '{frames_path}'")
+            return
+        print(f"Found {len(files)} .frames files in '{frames_path}'")
+        for fname in files:
+            fpath = os.path.join(frames_path, fname)
+            try:
+                file_frames, labels = load_frames_from_file(fpath)
+                frames.extend(file_frames)
+                frame_labels.extend(labels)
+                print(f"  Loaded {len(file_frames)} frames from {fname}")
+            except Exception as e:
+                print(f"  Error loading {fname}: {e}")
+    else:
+        print(f"Loading frames from '{frames_path}'...")
+        try:
+            file_frames, labels = load_frames_from_file(frames_path)
+            frames.extend(file_frames)
+            frame_labels.extend(labels)
+        except FileNotFoundError:
+            print(f"Error: '{frames_path}' not found")
+            return
+        except Exception as e:
+            print(f"Error loading frames: {e}")
+            return
 
     if not frames:
-        print("No frames found in pickle file")
+        print("No frames found")
         return
 
-    print(f"Loaded {len(frames)} frames")
+    print(f"Loaded {len(frames)} frames total")
 
     # Create dummy camera for detection functions
     camera = Camera(mode="dummy")
@@ -173,9 +223,10 @@ def main():
         else:
             draw_text_box(frame, "NO DETECTIONS", (10, 30))
 
-        # Draw frame counter
+        # Draw frame counter and source info
         counter_text = f"Frame {current_frame_index + 1}/{len(frames)}"
         draw_text_box(frame, counter_text, (10, frame.shape[0] - 20))
+        draw_text_box(frame, frame_labels[current_frame_index], (10, frame.shape[0] - 50))
 
         # Draw HSV info if a pixel was clicked
         if viewer_state["hsv_info"] is not None:
