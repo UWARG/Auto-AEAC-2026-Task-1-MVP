@@ -153,7 +153,7 @@ class MavlinkComm:
             logging.warning("Heading is not available")
             return 0.0
         return self.heading
-    def set_landing_target(self, angleOffset: list[int] = [0, 0], attempt: int = 0) -> None:
+    def set_landing_target(self, angleOffset: list[float] = [0, 0], attempt: int = 0) -> None:
             """Set landing_target in body frame with (radian) angle offset."""
             if attempt > 3:
                 logging.error("Failed to send landing target after 3 attempts")
