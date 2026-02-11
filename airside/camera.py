@@ -47,6 +47,7 @@ class Camera:
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
         mode: Literal["rpi", "webcam", "sim", "oakd", "dummy"] = "rpi",
         mav_comm=None,
+        use_oak_inference: bool = True,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -66,6 +67,7 @@ class Camera:
         self.mode = mode
         self._camera: BaseCameraDevice | None = None
         self._mav_comm = mav_comm
+        self.use_oak_inference = use_oak_inference
         # OAK-D specific state
         self._oakd_pipeline = None
         self._oakd_current_frame = None
@@ -261,12 +263,63 @@ class Camera:
     def find_targets(self, frame: np.ndarray) -> List[TargetDetection]:
         """
         Detect colored circular targets in the frame.
+        Flag-able dual path detection using CV2 or OAK-D.
         Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
             logging.warning("Invalid frame provided to colour_in_frame method")
             return []
 
+        # If flag is true then use OAK-D detection, otherwise use CV2 (defaults to OAK-D)
+        if self.use_oak_inference:
+            return self._find_targets_oak()
+        else:
+            return self._find_targets_cv2(frame)
+
+    def _find_targets_oak(self) -> List[TargetDetection]:
+        """
+        OAK-D target detection path from find_targets method.
+        """
+        # Create empty list to store TargetDetection objects
+        targets = []
+
+        # When det_queue method is defined, get all ImgDetection messages
+        detections = self.det_queue.get()
+
+        # Iterate through the ImgDetections messages
+        for detection in detections:
+            # Find centers of targets through average of max and min values multipled
+            # by the default frame dimensions
+            center_x = (detection.xmax + detection.xmin) / 2 * 640
+            center_y = (detection.ymax + detection.ymin) / 2 * 400
+
+            # Get corresponding colour value from Colours enum
+            colour = list(Colours)[detection.label].value
+
+            # Find area of the target
+            area = ((detection.ymax - detection.ymin) * h) * (
+                (detection.xmax - detection.xmin) * w
+            )
+
+            # Add detected iteration to targets list
+            targets.append(
+                TargetDetection(
+                    colour,
+                    center_x,
+                    center_y,
+                    1,
+                    1,
+                    area,
+                    None,
+                )
+            )
+
+        return targets
+
+    def _find_targets_cv2(self, frame: np.ndarray) -> List[TargetDetection]:
+        """
+        CV2 target detection path from find_targets method
+        """
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         targets = []
