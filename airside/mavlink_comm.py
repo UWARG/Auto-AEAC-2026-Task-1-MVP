@@ -274,8 +274,9 @@ class MavlinkComm:
     def _send_pickled_chunk(self, chunk_idx: int, total: int, chunk_data: str) -> None:
         """Send a single pickled chunk via STATUSTEXT."""
         chunk_str = f"{PICKLE_PREFIX}{chunk_idx}_{total}_{chunk_data}"
-        if len(chunk_str.encode("utf-8")) > 50:
-            logging.warning(f"Pickled chunk exceeds 50 bytes: {len(chunk_str)}")
+        chunk_len = len(chunk_str.encode("utf-8"))
+        if chunk_len > 50:
+            logging.warning(f"Pickled chunk exceeds 50 bytes: {chunk_len}")
         try:
             self.mav.mav.statustext_send(
                 mavutil.mavlink.MAV_SEVERITY_INFO,

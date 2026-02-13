@@ -1,8 +1,9 @@
 """
 Utility classes and constants for drone communication and data structures.
 
-This module provides core data structures and enums used throughout the drone control system,
-including coordinate representation, MAVLink message types, and RC channel data.
+This module provides core data structures and enums used throughout the
+drone control system, including coordinate representation, MAVLink message
+types, and RC channel data.
 """
 
 from enum import Enum
@@ -16,13 +17,16 @@ MAVLINK_TCP_PORT = 14550
 MAVLINK_RECEIVE_TIMEOUT_SEC = 1
 
 # Geometric calculation constants
-ALTITUDE_TOLERANCE_M = 0.5  # Tolerance for ground/roof level detection (meters)
+# Tolerance for ground/roof level detection (meters)
+ALTITUDE_TOLERANCE_M = 0.5
 
 # Pickle/STATUSTEXT chunking constants
-# STATUSTEXT message has 50-byte text field; metadata (p_{idx}_{total}_) uses ~8 bytes
+# STATUSTEXT message has 50-byte text field;
+# metadata (p_{idx}_{total}_) uses ~8 bytes
 STATUSTEXT_MAX_BYTES = 50
 PICKLE_PREFIX = "p_"
-PICKLE_CHUNK_PAYLOAD_SIZE = 42  # Bytes for base64 data per chunk after metadata
+# Bytes for base64 data per chunk after metadata
+PICKLE_CHUNK_PAYLOAD_SIZE = 42
 
 
 def chunk_base64_for_statustext(base64_str: str) -> list[str]:

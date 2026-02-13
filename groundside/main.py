@@ -47,7 +47,7 @@ def main() -> None:
 
                 description = building.generate_target_description(coordinate, colour)
                 print(f"\n{'='*80}")
-                print(f"TARGET DETECTED:")
+                print("TARGET DETECTED:")
                 print(description)
                 print(f"{'='*80}\n")
 

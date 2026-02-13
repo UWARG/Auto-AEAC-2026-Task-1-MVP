@@ -38,7 +38,7 @@ class MavlinkReceiver:
         """Establish MAVLink connection to receive messages from drone."""
         try:
             self.mav = mavutil.mavlink_connection(
-                f'tcp:{MAVLINK_TCP_HOST}:{MAVLINK_TCP_PORT}'
+                f"tcp:{MAVLINK_TCP_HOST}:{MAVLINK_TCP_PORT}"
             )
             self.mav.wait_heartbeat()
             logging.info(
@@ -60,7 +60,9 @@ class MavlinkReceiver:
         Types: 'building_corner', 'target', 'ack', 'pickled'
         """
         msg = self.mav.recv_match(
-            type='STATUSTEXT', blocking=True, timeout=MAVLINK_RECEIVE_TIMEOUT_SEC
+            type="STATUSTEXT",
+            blocking=True,
+            timeout=MAVLINK_RECEIVE_TIMEOUT_SEC,
         )
 
         if msg is None:
@@ -68,24 +70,25 @@ class MavlinkReceiver:
 
         # Filter messages from airside component
         if msg.get_srcComponent() != AIRSIDE_COMPONENT_ID:
-            logging.debug(f"Ignoring message from component {msg.get_srcComponent()}")
+            comp_id = msg.get_srcComponent()
+            logging.debug(f"Ignoring message from component {comp_id}")
             return None
 
         # Decode message text
         text = msg.text
         if isinstance(text, bytes):
-            text = text.decode('utf-8', errors='ignore').strip('\x00')
+            text = text.decode("utf-8", errors="ignore").strip("\x00")
 
         logging.debug(f"Received STATUSTEXT: {text}")
 
         # Parse message based on prefix
         if text.startswith(PICKLE_PREFIX):
             return self._handle_pickled_message(text)
-        elif text.startswith('b_'):
+        elif text.startswith("b_"):
             return self._parse_building_corner(text)
-        elif text.startswith('t_'):
+        elif text.startswith("t_"):
             return self._parse_target(text)
-        elif text.startswith('a_'):
+        elif text.startswith("a_"):
             return self._parse_acknowledgement(text)
         else:
             logging.debug(f"Unknown message format: {text}")
@@ -102,7 +105,8 @@ class MavlinkReceiver:
 
         chunk_idx, total, chunk_data = parsed
 
-        # When chunk 0 arrives, start new buffer (overwrite any incomplete message)
+        # When chunk 0 arrives, start new buffer
+        # (overwrite any incomplete message)
         if chunk_idx == 0:
             self._pickle_chunk_buffer = {}
 
@@ -112,9 +116,7 @@ class MavlinkReceiver:
             return None  # Not all chunks received yet
 
         # Reassemble and unpickle
-        base64_str = "".join(
-            self._pickle_chunk_buffer[i] for i in range(total)
-        )
+        base64_str = "".join(self._pickle_chunk_buffer[i] for i in range(total))
         self._pickle_chunk_buffer = {}  # Clear buffer
 
         try:
@@ -127,7 +129,10 @@ class MavlinkReceiver:
             return None
 
     def _parse_pickled_chunk(self, text: str) -> tuple[int, int, str] | None:
-        """Parse p_{idx}_{total}_{base64_data} format. Returns (idx, total, data) or None."""
+        """
+        Parse p_{idx}_{total}_{base64_data} format.
+        Returns (idx, total, data) or None.
+        """
         if not text.startswith(PICKLE_PREFIX):
             return None
         try:
@@ -147,7 +152,7 @@ class MavlinkReceiver:
         """Parse building corner from message format: b_lat_lon_alt"""
         try:
             # Remove 'b_' prefix and split
-            parts = text[2:].split('_')
+            parts = text[2:].split("_")
             if len(parts) != 3:
                 logging.warning(f"Invalid building corner format: {text}")
                 return None
@@ -159,10 +164,7 @@ class MavlinkReceiver:
             corner = Coordinate(lat=lat, lon=lon, alt=alt)
             logging.info(f"Parsed building corner: {corner}")
 
-            return {
-                'type': 'building_corner',
-                'data': corner
-            }
+            return {"type": "building_corner", "data": corner}
 
         except (ValueError, IndexError) as e:
             logging.error(f"Failed to parse building corner '{text}': {e}")
@@ -172,7 +174,7 @@ class MavlinkReceiver:
         """Parse target from format: t_lat_lon_alt_colour"""
         try:
             # Remove 't_' prefix and split
-            parts = text[2:].split('_')
+            parts = text[2:].split("_")
             if len(parts) != 4:
                 logging.warning(f"Invalid target format: {text}")
                 return None
@@ -186,11 +188,8 @@ class MavlinkReceiver:
             logging.info(f"Parsed target: {target}, colour: {colour}")
 
             return {
-                'type': 'target',
-                'data': {
-                    'coordinate': target,
-                    'colour': colour
-                }
+                "type": "target",
+                "data": {"coordinate": target, "colour": colour},
             }
 
         except (ValueError, IndexError) as e:
@@ -203,7 +202,4 @@ class MavlinkReceiver:
         ack_msg = text[2:]
         logging.info(f"Acknowledgement from drone: {ack_msg}")
 
-        return {
-            'type': 'ack',
-            'data': ack_msg
-        }
+        return {"type": "ack", "data": ack_msg}
