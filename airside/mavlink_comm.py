@@ -14,9 +14,13 @@ from util import (
     RCChannel,
     MavlinkMessageType,
     Vector3d,
+    PICKLE_PREFIX,
+    chunk_base64_for_statustext,
 )
 from airside.building import Building
+import base64
 import logging
+import pickle
 import time
 
 
@@ -245,3 +249,38 @@ class MavlinkComm:
         except Exception as e:
             logging.error(f"Failed to send building info to ground: {e}")
             self.send_building_info_to_ground(building, attempt + 1)
+
+    def pickle_and_send(self, obj: object, attempt: int = 0) -> None:
+        """
+        Pickle object, base64-encode, chunk into STATUSTEXT-sized pieces,
+        and send via multiple STATUSTEXT messages.
+        """
+        if attempt > 3:
+            logging.error("Failed to pickle and send after 3 attempts")
+            return
+
+        try:
+            pickled_bytes = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+            base64_str = base64.b64encode(pickled_bytes).decode("ascii")
+            chunks = chunk_base64_for_statustext(base64_str)
+            total = len(chunks)
+
+            for idx, chunk_data in enumerate(chunks):
+                self._send_pickled_chunk(idx, total, chunk_data)
+        except Exception as e:
+            logging.error(f"Failed to pickle and send: {e}")
+            self.pickle_and_send(obj, attempt + 1)
+
+    def _send_pickled_chunk(self, chunk_idx: int, total: int, chunk_data: str) -> None:
+        """Send a single pickled chunk via STATUSTEXT."""
+        chunk_str = f"{PICKLE_PREFIX}{chunk_idx}_{total}_{chunk_data}"
+        if len(chunk_str.encode("utf-8")) > 50:
+            logging.warning(f"Pickled chunk exceeds 50 bytes: {len(chunk_str)}")
+        try:
+            self.mav.mav.statustext_send(
+                mavutil.mavlink.MAV_SEVERITY_INFO,
+                chunk_str.encode("utf-8"),
+            )
+        except Exception as e:
+            logging.error(f"Failed to send pickled chunk: {e}")
+            raise

@@ -54,6 +54,9 @@ def main() -> None:
             elif msg_type == "ack":
                 logging.info(f"Drone acknowledgement: {data}")
 
+            elif msg_type == "pickled":
+                logging.info(f"Received pickled object: {data}")
+
     except KeyboardInterrupt:
         logging.info("Shutting down groundside station...")
 

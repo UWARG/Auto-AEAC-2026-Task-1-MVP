@@ -18,6 +18,24 @@ MAVLINK_RECEIVE_TIMEOUT_SEC = 1
 # Geometric calculation constants
 ALTITUDE_TOLERANCE_M = 0.5  # Tolerance for ground/roof level detection (meters)
 
+# Pickle/STATUSTEXT chunking constants
+# STATUSTEXT message has 50-byte text field; metadata (p_{idx}_{total}_) uses ~8 bytes
+STATUSTEXT_MAX_BYTES = 50
+PICKLE_PREFIX = "p_"
+PICKLE_CHUNK_PAYLOAD_SIZE = 42  # Bytes for base64 data per chunk after metadata
+
+
+def chunk_base64_for_statustext(base64_str: str) -> list[str]:
+    """
+    Split base64 string into chunks fitting STATUSTEXT 50-byte limit.
+    Each chunk will be wrapped as p_{idx}_{total}_{chunk} by caller.
+    """
+    chunks = []
+    payload_size = PICKLE_CHUNK_PAYLOAD_SIZE
+    for i in range(0, len(base64_str), payload_size):
+        chunks.append(base64_str[i : i + payload_size])
+    return chunks
+
 
 class MavlinkMessageType(Enum):
     """MAVLink message types used in drone communication"""

@@ -5,9 +5,13 @@ This module receives STATUSTEXT messages from the drone containing:
 - Building corner data (b_lat_lon_alt)
 - Target locations (t_lat_lon_alt_colour)
 - Acknowledgements (a_...)
+- Pickled objects (p_{idx}_{total}_{base64_chunk})
 """
 
+import base64
+import binascii
 import logging
+import pickle
 import time
 from pymavlink import mavutil
 from util import (
@@ -16,6 +20,7 @@ from util import (
     MAVLINK_TCP_HOST,
     MAVLINK_TCP_PORT,
     MAVLINK_RECEIVE_TIMEOUT_SEC,
+    PICKLE_PREFIX,
 )
 
 
@@ -24,6 +29,7 @@ class MavlinkReceiver:
 
     def __init__(self):
         """Initialize MAVLink connection."""
+        self._pickle_chunk_buffer: dict[int, str] = {}
         while not self.__mavlink_connect():
             logging.info("Failed to connect to drone, retrying...")
             time.sleep(1)
@@ -51,7 +57,7 @@ class MavlinkReceiver:
         Process incoming MAVLink STATUSTEXT messages.
 
         Returns dict with 'type' and 'data' keys, or None if no message.
-        Types: 'building_corner', 'target', 'ack'
+        Types: 'building_corner', 'target', 'ack', 'pickled'
         """
         msg = self.mav.recv_match(
             type='STATUSTEXT', blocking=True, timeout=MAVLINK_RECEIVE_TIMEOUT_SEC
@@ -73,7 +79,9 @@ class MavlinkReceiver:
         logging.debug(f"Received STATUSTEXT: {text}")
 
         # Parse message based on prefix
-        if text.startswith('b_'):
+        if text.startswith(PICKLE_PREFIX):
+            return self._handle_pickled_message(text)
+        elif text.startswith('b_'):
             return self._parse_building_corner(text)
         elif text.startswith('t_'):
             return self._parse_target(text)
@@ -81,6 +89,58 @@ class MavlinkReceiver:
             return self._parse_acknowledgement(text)
         else:
             logging.debug(f"Unknown message format: {text}")
+            return None
+
+    def _handle_pickled_message(self, text: str) -> dict | None:
+        """
+        Reassemble pickled chunks and unpickle.
+        Returns {type: 'pickled', data: obj} when complete, else None.
+        """
+        parsed = self._parse_pickled_chunk(text)
+        if parsed is None:
+            return None
+
+        chunk_idx, total, chunk_data = parsed
+
+        # When chunk 0 arrives, start new buffer (overwrite any incomplete message)
+        if chunk_idx == 0:
+            self._pickle_chunk_buffer = {}
+
+        self._pickle_chunk_buffer[chunk_idx] = chunk_data
+
+        if len(self._pickle_chunk_buffer) != total:
+            return None  # Not all chunks received yet
+
+        # Reassemble and unpickle
+        base64_str = "".join(
+            self._pickle_chunk_buffer[i] for i in range(total)
+        )
+        self._pickle_chunk_buffer = {}  # Clear buffer
+
+        try:
+            pickled_bytes = base64.b64decode(base64_str)
+            obj = pickle.loads(pickled_bytes)
+            logging.info(f"Unpickled object: {type(obj).__name__}")
+            return {"type": "pickled", "data": obj}
+        except (binascii.Error, ValueError, pickle.UnpicklingError) as e:
+            logging.error(f"Failed to unpickle: {e}")
+            return None
+
+    def _parse_pickled_chunk(self, text: str) -> tuple[int, int, str] | None:
+        """Parse p_{idx}_{total}_{base64_data} format. Returns (idx, total, data) or None."""
+        if not text.startswith(PICKLE_PREFIX):
+            return None
+        try:
+            rest = text[len(PICKLE_PREFIX) :]
+            parts = rest.split("_", 2)  # Split into max 3 parts
+            if len(parts) != 3:
+                return None
+            chunk_idx = int(parts[0])
+            total = int(parts[1])
+            chunk_data = parts[2]
+            return (chunk_idx, total, chunk_data)
+        except (ValueError, IndexError) as e:
+            logging.warning(f"Invalid pickled chunk format '{text}': {e}")
             return None
 
     def _parse_building_corner(self, text: str) -> dict | None:
