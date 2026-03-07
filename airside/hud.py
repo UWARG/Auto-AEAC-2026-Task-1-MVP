@@ -242,9 +242,7 @@ def draw_metrics_panel(
 
     # Color
     if colour is not None:
-        _draw_text_with_background(
-            frame, f"COLOR: {colour.name}", (x, y), COLOR_YELLOW
-        )
+        _draw_text_with_background(frame, f"COLOR: {colour.name}", (x, y), COLOR_YELLOW)
 
 
 def overlay_hud(
@@ -287,9 +285,7 @@ def overlay_hud(
         )
 
     # Draw status panel
-    draw_status_panel(
-        display_frame, camera_label, mode, corner_count, hud_state.locked
-    )
+    draw_status_panel(display_frame, camera_label, mode, corner_count, hud_state.locked)
 
     # Draw metrics panel
     draw_metrics_panel(

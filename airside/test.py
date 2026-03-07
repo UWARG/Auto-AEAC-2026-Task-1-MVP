@@ -30,10 +30,12 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
     # Thresholds for detection
     MIN_AREA = 100  # Minimum contour area in pixels
     MIN_CIRCULARITY = 0.6  # Circularity threshold (1.0 = perfect circle)
-    MIN_FILL_RATIO = 0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
+    MIN_FILL_RATIO = (
+        0.7  # Minimum ratio of colored pixels to contour area (1.0 = completely filled)
+    )
 
     # Track the closest circular target to frame center
-    min_distance = float('inf')
+    min_distance = float("inf")
     detected_colour = None
     detected_center = None
 
@@ -57,14 +59,19 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
 
         # Create colored mask for visualization
         mask_colored = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        cv2.putText(mask_colored, f"{colour.name}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(
+            mask_colored,
+            f"{colour.name}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255, 255, 255),
+            2,
+        )
         all_masks.append(mask_colored)
 
         # Find contours in the mask
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         print(f"  Contours found: {len(contours)}")
 
         # Draw contours on a copy of the frame
@@ -87,7 +94,9 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
             # Check fill ratio: ensure the contour is solid, not hollow
             contour_mask = np.zeros(frame_hsv.shape[:2], dtype=np.uint8)
             cv2.drawContours(contour_mask, [contour], -1, 255, -1)
-            colored_pixels_in_contour = cv2.countNonZero(cv2.bitwise_and(mask, contour_mask))
+            colored_pixels_in_contour = cv2.countNonZero(
+                cv2.bitwise_and(mask, contour_mask)
+            )
             fill_ratio = colored_pixels_in_contour / area if area > 0 else 0
 
             # Calculate center
@@ -98,22 +107,31 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
 
                 # Calculate distance from frame center
                 distance = np.sqrt(
-                    (center_x - frame_center_x)**2 +
-                    (center_y - frame_center_y)**2
+                    (center_x - frame_center_x) ** 2 + (center_y - frame_center_y) ** 2
                 )
 
-                print(f"    Contour {idx}: area={area:.0f}, circularity={circularity:.3f}, "
-                      f"fill_ratio={fill_ratio:.3f}, "
-                      f"center=({center_x:.1f}, {center_y:.1f}), distance={distance:.1f}")
+                print(
+                    f"    Contour {idx}: area={area:.0f}, circularity={circularity:.3f}, "
+                    f"fill_ratio={fill_ratio:.3f}, "
+                    f"center=({center_x:.1f}, {center_y:.1f}), distance={distance:.1f}"
+                )
 
                 # Draw center point
-                cv2.circle(contour_image, (int(center_x), int(center_y)), 5, (255, 0, 0), -1)
+                cv2.circle(
+                    contour_image, (int(center_x), int(center_y)), 5, (255, 0, 0), -1
+                )
 
                 # Check if this is a valid circular contour
                 if circularity >= MIN_CIRCULARITY and fill_ratio >= MIN_FILL_RATIO:
                     valid_contours += 1
                     # Draw circle around valid circular contours
-                    cv2.circle(contour_image, (int(center_x), int(center_y)), 10, (0, 255, 255), 2)
+                    cv2.circle(
+                        contour_image,
+                        (int(center_x), int(center_y)),
+                        10,
+                        (0, 255, 255),
+                        2,
+                    )
 
                     if distance < min_distance:
                         min_distance = distance
@@ -122,36 +140,76 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
 
         print(f"  Valid circular contours: {valid_contours}\n")
 
-        cv2.putText(contour_image, f"{colour.name} - {valid_contours} valid",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(
+            contour_image,
+            f"{colour.name} - {valid_contours} valid",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
         all_contour_images.append(contour_image)
 
     # Create final result image
     result_image = frame.copy()
-    cv2.circle(result_image, (int(frame_center_x), int(frame_center_y)), 10, (255, 255, 255), 2)
-    cv2.line(result_image, (int(frame_center_x) - 20, int(frame_center_y)),
-             (int(frame_center_x) + 20, int(frame_center_y)), (255, 255, 255), 2)
-    cv2.line(result_image, (int(frame_center_x), int(frame_center_y) - 20),
-             (int(frame_center_x), int(frame_center_y) + 20), (255, 255, 255), 2)
+    cv2.circle(
+        result_image, (int(frame_center_x), int(frame_center_y)), 10, (255, 255, 255), 2
+    )
+    cv2.line(
+        result_image,
+        (int(frame_center_x) - 20, int(frame_center_y)),
+        (int(frame_center_x) + 20, int(frame_center_y)),
+        (255, 255, 255),
+        2,
+    )
+    cv2.line(
+        result_image,
+        (int(frame_center_x), int(frame_center_y) - 20),
+        (int(frame_center_x), int(frame_center_y) + 20),
+        (255, 255, 255),
+        2,
+    )
 
     if detected_colour is not None:
         print(f"{'='*60}")
-        print(f"DETECTED: {detected_colour.name} at distance {min_distance:.1f} pixels from center")
+        print(
+            f"DETECTED: {detected_colour.name} at distance {min_distance:.1f} pixels from center"
+        )
         print(f"Target center: {detected_center}")
         print(f"{'='*60}\n")
 
         # Draw detected target
         cv2.circle(result_image, detected_center, 15, (0, 255, 0), 3)
-        cv2.line(result_image, (int(frame_center_x), int(frame_center_y)),
-                 detected_center, (0, 255, 0), 2)
-        cv2.putText(result_image, f"DETECTED: {detected_colour.name}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.line(
+            result_image,
+            (int(frame_center_x), int(frame_center_y)),
+            detected_center,
+            (0, 255, 0),
+            2,
+        )
+        cv2.putText(
+            result_image,
+            f"DETECTED: {detected_colour.name}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
     else:
         print(f"{'='*60}")
         print("NO CIRCULAR TARGET DETECTED")
         print(f"{'='*60}\n")
-        cv2.putText(result_image, "NO TARGET DETECTED",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(
+            result_image,
+            "NO TARGET DETECTED",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+        )
 
     # Stack masks horizontally
     masks_row = np.hstack(all_masks)
@@ -168,7 +226,9 @@ def visualize_color_detection(frame: np.ndarray, image_name: str):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Visualize color detection on an image")
+    parser = argparse.ArgumentParser(
+        description="Visualize color detection on an image"
+    )
     parser.add_argument("image_path", type=str, help="Path to the image file")
     args = parser.parse_args()
 

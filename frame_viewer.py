@@ -92,7 +92,10 @@ def load_frames_from_file(path):
     with open(path, "rb") as f:
         file_frames = pickle.load(f)
 
-    labels = [f"{label}  (frame {i}/{len(file_frames)})  [{filename}]" for i in range(1, len(file_frames) + 1)]
+    labels = [
+        f"{label}  (frame {i}/{len(file_frames)})  [{filename}]"
+        for i in range(1, len(file_frames) + 1)
+    ]
     return file_frames, labels
 
 
@@ -107,9 +110,7 @@ def main():
 
     if os.path.isdir(frames_path):
         # Load all .frames files in the directory, sorted by name (timestamp order)
-        files = sorted(
-            f for f in os.listdir(frames_path) if f.endswith(".frames")
-        )
+        files = sorted(f for f in os.listdir(frames_path) if f.endswith(".frames"))
         if not files:
             print(f"No .frames files found in '{frames_path}'")
             return
@@ -226,7 +227,9 @@ def main():
         # Draw frame counter and source info
         counter_text = f"Frame {current_frame_index + 1}/{len(frames)}"
         draw_text_box(frame, counter_text, (10, frame.shape[0] - 20))
-        draw_text_box(frame, frame_labels[current_frame_index], (10, frame.shape[0] - 50))
+        draw_text_box(
+            frame, frame_labels[current_frame_index], (10, frame.shape[0] - 50)
+        )
 
         # Draw HSV info if a pixel was clicked
         if viewer_state["hsv_info"] is not None:
