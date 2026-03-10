@@ -4,7 +4,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import cv2
 import depthai as dai
@@ -85,7 +85,7 @@ class MavlinkReader(threading.Thread):
         self.connection_str = connection_str
         self.state = state
         self._stop_event = threading.Event()
-        self._mav: Optional[mavutil.mavfile] = None
+        self._mav: Optional[Any] = None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -136,10 +136,15 @@ class MavlinkReader(threading.Thread):
             logging.error(f"UDP Connection failed: {exc}")
             return
 
+        mav = self._mav
+        if mav is None:
+            logging.error("UDP Connection failed: no MAVLink handle")
+            return
+
         logging.info("Waiting for UDP Heartbeat...")
         try:
-            self._mav.wait_heartbeat(timeout=10)
-            logging.info(f"Heartbeat received from {self._mav.target_system}")
+            mav.wait_heartbeat(timeout=10)
+            logging.info(f"Heartbeat received from {mav.target_system}")
         except:
             logging.warning("No heartbeat. Ensure FC is powered and IP is correct.")
 
@@ -150,7 +155,7 @@ class MavlinkReader(threading.Thread):
 
         while not self._stop_event.is_set():
             try:
-                msg = self._mav.recv_match(
+                msg = mav.recv_match(
                     type=["DISTANCE_SENSOR", "RANGEFINDER", "ATTITUDE"],
                     blocking=True,
                     timeout=MAVLINK_TIMEOUT,
@@ -180,7 +185,7 @@ class OakCamera:
 
     def __init__(self, width: int, height: int) -> None:
         self.width, self.height = width, height
-        self._device: Optional[dai.Device] = None
+        self._pipeline: Optional[dai.Pipeline] = None
         self._rgb_queue = None
         self._depth_queue = None
         self._lock = threading.Lock()
@@ -190,19 +195,13 @@ class OakCamera:
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
-    def _build_pipeline(self) -> dai.Pipeline:
+    def _build_pipeline(self):
         pipeline = dai.Pipeline()
 
         rgb = pipeline.create(dai.node.ColorCamera)
         left = pipeline.create(dai.node.MonoCamera)
         right = pipeline.create(dai.node.MonoCamera)
         stereo = pipeline.create(dai.node.StereoDepth)
-        xout_rgb = pipeline.create(dai.node.XLinkOut)
-        xout_depth = pipeline.create(dai.node.XLinkOut)
-
-        xout_rgb.setStreamName("rgb")
-        xout_depth.setStreamName("depth")
-
         rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         rgb.setPreviewSize(self.width, self.height)
@@ -217,7 +216,7 @@ class OakCamera:
         left.setFps(20)
         right.setFps(20)
 
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DENSITY)
         stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
         stereo.setOutputSize(self.width, self.height)
         stereo.setSubpixel(True)
@@ -225,21 +224,15 @@ class OakCamera:
 
         left.out.link(stereo.left)
         right.out.link(stereo.right)
-        rgb.preview.link(xout_rgb.input)
-        stereo.depth.link(xout_depth.input)
-
-        return pipeline
+        return pipeline, rgb.preview, stereo.depth
 
     def _capture_loop(self):
         try:
-            pipeline = self._build_pipeline()
-            self._device = dai.Device(pipeline)
-            self._rgb_queue = self._device.getOutputQueue(
-                name="rgb", maxSize=2, blocking=False
-            )
-            self._depth_queue = self._device.getOutputQueue(
-                name="depth", maxSize=2, blocking=False
-            )
+            pipeline, rgb_output, depth_output = self._build_pipeline()
+            self._rgb_queue = rgb_output.createOutputQueue(maxSize=2, blocking=False)
+            self._depth_queue = depth_output.createOutputQueue(maxSize=2, blocking=False)
+            pipeline.start()
+            self._pipeline = pipeline
         except Exception as exc:
             logging.exception("Failed to initialize OAK-D Pro pipeline")
             return
@@ -254,10 +247,12 @@ class OakCamera:
 
             if rgb_frame is not None:
                 with self._lock:
-                    self._latest_rgb = rgb_frame.getCvFrame()
+                    rgb_img = cast(Any, rgb_frame).getCvFrame()
+                    self._latest_rgb = rgb_img
             if depth_frame is not None:
                 with self._lock:
-                    self._latest_depth = depth_frame.getFrame().copy()
+                    depth_img = cast(Any, depth_frame).getFrame().copy()
+                    self._latest_depth = depth_img
             if rgb_frame is None and depth_frame is None:
                 time.sleep(0.01)
 
@@ -297,8 +292,8 @@ class OakCamera:
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=1.0)
-        if self._device is not None:
-            self._device.close()
+        if self._pipeline is not None:
+            self._pipeline.stop()
 
 
 def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState):

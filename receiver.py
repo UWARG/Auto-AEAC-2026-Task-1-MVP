@@ -26,7 +26,7 @@ CROSSHAIR_SIZE = 8  # half-length of each crosshair arm in pixels
 # =========================
 
 # IP and port of the transmitter (Raspberry Pi on the drone)
-TRANSMITTER_HOST = "192.168.1.67"
+TRANSMITTER_HOST = "192.168.232.15"
 TRANSMITTER_PORT = 5000
 
 SOCKET_TIMEOUT = 10.0  # seconds
