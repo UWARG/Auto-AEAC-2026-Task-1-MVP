@@ -191,6 +191,8 @@ class OakCamera:
         self._lock = threading.Lock()
         self._latest_rgb: Optional[np.ndarray] = None
         self._latest_depth: Optional[np.ndarray] = None
+        self._logged_first_rgb = False
+        self._logged_first_depth = False
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
@@ -249,16 +251,35 @@ class OakCamera:
                 with self._lock:
                     rgb_img = cast(Any, rgb_frame).getCvFrame()
                     self._latest_rgb = rgb_img
+                if not self._logged_first_rgb:
+                    logging.info(
+                        "Received first RGB frame (%dx%d)",
+                        rgb_img.shape[1],
+                        rgb_img.shape[0],
+                    )
+                    self._logged_first_rgb = True
             if depth_frame is not None:
                 with self._lock:
                     depth_img = cast(Any, depth_frame).getFrame().copy()
                     self._latest_depth = depth_img
+                if not self._logged_first_depth:
+                    logging.info(
+                        "Received first depth frame (%dx%d)",
+                        depth_img.shape[1],
+                        depth_img.shape[0],
+                    )
+                    self._logged_first_depth = True
             if rgb_frame is None and depth_frame is None:
                 time.sleep(0.01)
 
     def capture_payloads(self) -> Tuple[bytes, bytes, float]:
         with self._lock:
             if self._latest_rgb is None or self._latest_depth is None:
+                logging.warning(
+                    "Capture requested before camera frames ready (rgb_ready=%s depth_ready=%s)",
+                    self._latest_rgb is not None,
+                    self._latest_depth is not None,
+                )
                 return b"", b"", float("nan")
             rgb_frame = cv2.flip(self._latest_rgb, -1)
             depth_frame = cv2.flip(self._latest_depth, -1)
@@ -286,6 +307,12 @@ class OakCamera:
         center_depth_m = (
             float(np.median(valid) / 1000.0) if valid.size else float("nan")
         )
+        logging.info(
+            "Prepared capture payload (jpeg=%d bytes, depth_png=%d bytes, center_depth=%.2f m)",
+            len(jpeg_buf),
+            len(depth_buf),
+            center_depth_m,
+        )
         return jpeg_buf.tobytes(), depth_buf.tobytes(), center_depth_m
 
     def release(self):
@@ -299,11 +326,33 @@ class OakCamera:
 def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState):
     try:
         if conn.recv(1) == b"C":
+            logging.info("Capture command received from %s:%s", addr[0], addr[1])
             # Wait until pitch is within tolerance of level before capturing.
+            wait_started = time.time()
+            next_wait_log = wait_started
             while True:
                 downward_range, pitch, roll = telemetry_state.get()
                 if not math.isnan(pitch) and abs(pitch) <= PITCH_LEVEL_TOLERANCE_RAD:
+                    elapsed = time.time() - wait_started
+                    logging.info(
+                        "Pitch level condition met after %.2fs (pitch=%.2f deg)",
+                        elapsed,
+                        math.degrees(pitch),
+                    )
                     break
+                now = time.time()
+                if now >= next_wait_log:
+                    if math.isnan(pitch):
+                        pitch_text = "N/A"
+                    else:
+                        pitch_text = f"{math.degrees(pitch):.2f} deg"
+                    logging.info(
+                        "Waiting for level... elapsed=%.2fs pitch=%s tolerance=%.2f deg",
+                        now - wait_started,
+                        pitch_text,
+                        math.degrees(PITCH_LEVEL_TOLERANCE_RAD),
+                    )
+                    next_wait_log = now + 1.0
                 # Update at ~50 Hz while waiting for level
                 time.sleep(0.02)
 
@@ -318,6 +367,14 @@ def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState
                 len(depth_bytes),
             )
             conn.sendall(header + jpeg_bytes + depth_bytes)
+            logging.info(
+                "Sent capture response to %s:%s (header=%d, jpeg=%d, depth=%d)",
+                addr[0],
+                addr[1],
+                len(header),
+                len(jpeg_bytes),
+                len(depth_bytes),
+            )
     finally:
         conn.close()
 
