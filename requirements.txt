@@ -1,3 +1,4 @@
+depthai
 numpy
 opencv-python
 Pillow

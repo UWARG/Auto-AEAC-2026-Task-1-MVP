@@ -1,14 +1,13 @@
 import logging
 import math
-import signal
 import socket
 import struct
-import sys
 import threading
 import time
 from typing import Optional, Tuple
 
 import cv2
+import depthai as dai
 import numpy as np
 from pymavlink import mavutil
 
@@ -17,14 +16,14 @@ from pymavlink import mavutil
 # =========================
 
 # Network settings for the Transmission Server (this script)
-HOST = "0.0.0.0" 
+HOST = "0.0.0.0"
 PORT = 5000
 
-# Camera settings
-CAMERA_INDEX = 0
+# OAK-D Pro output settings
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 360
 JPEG_QUALITY = 90
+DEPTH_PNG_COMPRESSION = 3
 
 # Flight Controller UDP Settings
 # format: "udpout:IP_ADDRESS:PORT"
@@ -42,43 +41,46 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-class RangefinderState:
-    """Thread-safe storage for latest rangefinder readings and attitude (pitch/roll in rad)."""
+
+class TelemetryState:
+    """Thread-safe storage for downward range and attitude (pitch/roll in rad)."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._range1: Optional[float] = None
-        self._range2: Optional[float] = None
+        self._downward_range: Optional[float] = None
         self._pitch: Optional[float] = None  # radians, from ATTITUDE
-        self._roll: Optional[float] = None   # radians, from ATTITUDE
+        self._roll: Optional[float] = None  # radians, from ATTITUDE
 
     def update(
         self,
-        r1: Optional[float] = None,
-        r2: Optional[float] = None,
+        downward_range: Optional[float] = None,
         pitch: Optional[float] = None,
         roll: Optional[float] = None,
     ) -> None:
         with self._lock:
-            if r1 is not None:
-                self._range1 = r1
-            if r2 is not None:
-                self._range2 = r2
+            if downward_range is not None:
+                self._downward_range = downward_range
             if pitch is not None:
                 self._pitch = pitch
             if roll is not None:
                 self._roll = roll
 
-    def get(self) -> Tuple[float, float, float, float]:
+    def get(self) -> Tuple[float, float, float]:
         with self._lock:
-            r1 = self._range1 if self._range1 is not None else float("nan")
-            r2 = self._range2 if self._range2 is not None else float("nan")
+            downward_range = (
+                self._downward_range
+                if self._downward_range is not None
+                else float("nan")
+            )
             p = self._pitch if self._pitch is not None else float("nan")
             r = self._roll if self._roll is not None else float("nan")
-        return r1, r2, p, r
+        return downward_range, p, r
+
 
 class MavlinkReader(threading.Thread):
     """Background thread to read MAVLink via UDP."""
-    def __init__(self, connection_str: str, state: RangefinderState) -> None:
+
+    def __init__(self, connection_str: str, state: TelemetryState) -> None:
         super().__init__(daemon=True)
         self.connection_str = connection_str
         self.state = state
@@ -88,18 +90,21 @@ class MavlinkReader(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
-    def _request_rangefinder_streams(self) -> None:
+    def _request_telemetry_streams(self) -> None:
         if self._mav is None:
             return
         mav = self._mav.mav
         sys_id = self._mav.target_system
         comp_id = self._mav.target_component
 
-        # Request rangefinders at 10 Hz and attitude at 50 Hz for smoother pitch updates.
         requests = [
-            ("RANGEFINDER", mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER, 100_000),   # 10 Hz
-            ("DISTANCE_SENSOR", mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR, 100_000),  # 10 Hz
-            ("ATTITUDE", mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 20_000),         # 50 Hz
+            ("RANGEFINDER", mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER, 100_000),
+            (
+                "DISTANCE_SENSOR",
+                mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR,
+                100_000,
+            ),
+            ("ATTITUDE", mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 20_000),  # 50 Hz
         ]
 
         for name, msg_id, interval_us in requests:
@@ -116,13 +121,17 @@ class MavlinkReader(threading.Thread):
                 0,
                 0,
             )
-            logging.info(f"Requested {name} via UDP at {1_000_000/interval_us:.1f} Hz")
+            logging.info(
+                f"Requested {name} via UDP at {1_000_000 / interval_us:.1f} Hz"
+            )
 
     def run(self) -> None:
         try:
             logging.info(f"Connecting to FC MAVLink via UDP: {self.connection_str}")
             # UDP doesn't need a baud rate
-            self._mav = mavutil.mavlink_connection(self.connection_str, dialect="ardupilotmega")
+            self._mav = mavutil.mavlink_connection(
+                self.connection_str, dialect="ardupilotmega"
+            )
         except Exception as exc:
             logging.error(f"UDP Connection failed: {exc}")
             return
@@ -135,7 +144,7 @@ class MavlinkReader(threading.Thread):
             logging.warning("No heartbeat. Ensure FC is powered and IP is correct.")
 
         try:
-            self._request_rangefinder_streams()
+            self._request_telemetry_streams()
         except Exception as exc:
             logging.error(f"Stream request failed: {exc}")
 
@@ -155,71 +164,174 @@ class MavlinkReader(threading.Thread):
                 elif msg.get_type() == "DISTANCE_SENSOR":
                     dist = float(msg.current_distance) / 100.0
                     sensor_id = getattr(msg, "id", 0)
-                    if sensor_id == 1: self.state.update(r2=dist)
-                    else: self.state.update(r1=dist)
-                
+                    if sensor_id != 1:
+                        self.state.update(downward_range=dist)
+
                 elif msg.get_type() == "RANGEFINDER":
                     dist = float(msg.distance)
-                    self.state.update(r1=dist, r2=dist)
+                    self.state.update(downward_range=dist)
 
             except Exception as exc:
                 continue
 
-class Camera:
-    """OpenCV Background Capture."""
-    def __init__(self, index: int, width: int, height: int) -> None:
-        self.index, self.width, self.height = index, width, height
-        self._cap = None
+
+class OakCamera:
+    """Background capture for aligned RGB and depth frames from an OAK-D Pro."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width, self.height = width, height
+        self._device: Optional[dai.Device] = None
+        self._rgb_queue = None
+        self._depth_queue = None
         self._lock = threading.Lock()
-        self._latest_frame = None
+        self._latest_rgb: Optional[np.ndarray] = None
+        self._latest_depth: Optional[np.ndarray] = None
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
-    def _capture_loop(self):
-        self._cap = cv2.VideoCapture(self.index)
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        while not self._stop_event.is_set():
-            ret, frame = self._cap.read()
-            if ret:
-                with self._lock: self._latest_frame = frame
-            time.sleep(0.01)
+    def _build_pipeline(self) -> dai.Pipeline:
+        pipeline = dai.Pipeline()
 
-    def capture_jpeg(self) -> bytes:
+        rgb = pipeline.create(dai.node.ColorCamera)
+        left = pipeline.create(dai.node.MonoCamera)
+        right = pipeline.create(dai.node.MonoCamera)
+        stereo = pipeline.create(dai.node.StereoDepth)
+        xout_rgb = pipeline.create(dai.node.XLinkOut)
+        xout_depth = pipeline.create(dai.node.XLinkOut)
+
+        xout_rgb.setStreamName("rgb")
+        xout_depth.setStreamName("depth")
+
+        rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        rgb.setPreviewSize(self.width, self.height)
+        rgb.setInterleaved(False)
+        rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        rgb.setFps(20)
+
+        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        left.setFps(20)
+        right.setFps(20)
+
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+        stereo.setOutputSize(self.width, self.height)
+        stereo.setSubpixel(True)
+        stereo.setLeftRightCheck(True)
+
+        left.out.link(stereo.left)
+        right.out.link(stereo.right)
+        rgb.preview.link(xout_rgb.input)
+        stereo.depth.link(xout_depth.input)
+
+        return pipeline
+
+    def _capture_loop(self):
+        try:
+            pipeline = self._build_pipeline()
+            self._device = dai.Device(pipeline)
+            self._rgb_queue = self._device.getOutputQueue(
+                name="rgb", maxSize=2, blocking=False
+            )
+            self._depth_queue = self._device.getOutputQueue(
+                name="depth", maxSize=2, blocking=False
+            )
+        except Exception as exc:
+            logging.exception("Failed to initialize OAK-D Pro pipeline")
+            return
+
+        while not self._stop_event.is_set():
+            rgb_frame = (
+                self._rgb_queue.tryGet() if self._rgb_queue is not None else None
+            )
+            depth_frame = (
+                self._depth_queue.tryGet() if self._depth_queue is not None else None
+            )
+
+            if rgb_frame is not None:
+                with self._lock:
+                    self._latest_rgb = rgb_frame.getCvFrame()
+            if depth_frame is not None:
+                with self._lock:
+                    self._latest_depth = depth_frame.getFrame().copy()
+            if rgb_frame is None and depth_frame is None:
+                time.sleep(0.01)
+
+    def capture_payloads(self) -> Tuple[bytes, bytes, float]:
         with self._lock:
-            if self._latest_frame is None: return b""
-            frame = cv2.flip(self._latest_frame, -1)
-        _, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-        return buf.tobytes()
+            if self._latest_rgb is None or self._latest_depth is None:
+                return b"", b"", float("nan")
+            rgb_frame = cv2.flip(self._latest_rgb, -1)
+            depth_frame = cv2.flip(self._latest_depth, -1)
+
+        ok_jpeg, jpeg_buf = cv2.imencode(
+            ".jpg",
+            rgb_frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
+        )
+        ok_png, depth_buf = cv2.imencode(
+            ".png",
+            depth_frame,
+            [int(cv2.IMWRITE_PNG_COMPRESSION), DEPTH_PNG_COMPRESSION],
+        )
+        if not ok_jpeg or not ok_png:
+            return b"", b"", float("nan")
+
+        center_y = depth_frame.shape[0] // 2
+        center_x = depth_frame.shape[1] // 2
+        center_patch = depth_frame[
+            max(0, center_y - 4) : min(depth_frame.shape[0], center_y + 5),
+            max(0, center_x - 4) : min(depth_frame.shape[1], center_x + 5),
+        ]
+        valid = center_patch[center_patch > 0]
+        center_depth_m = (
+            float(np.median(valid) / 1000.0) if valid.size else float("nan")
+        )
+        return jpeg_buf.tobytes(), depth_buf.tobytes(), center_depth_m
 
     def release(self):
         self._stop_event.set()
-        if self._cap: self._cap.release()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        if self._device is not None:
+            self._device.close()
 
-def handle_client(conn, addr, camera, rf_state):
+
+def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState):
     try:
         if conn.recv(1) == b"C":
             # Wait until pitch is within tolerance of level before capturing.
             while True:
-                r1, r2, pitch, roll = rf_state.get()
+                downward_range, pitch, roll = telemetry_state.get()
                 if not math.isnan(pitch) and abs(pitch) <= PITCH_LEVEL_TOLERANCE_RAD:
                     break
                 # Update at ~50 Hz while waiting for level
                 time.sleep(0.02)
 
-            jpeg_bytes = camera.capture_jpeg()
-            # Header: range1, range2, pitch (rad), roll (rad), image length
-            header = struct.pack("!ffffQ", float(r1), float(r2), float(pitch), float(roll), len(jpeg_bytes))
-            conn.sendall(header + jpeg_bytes)
+            jpeg_bytes, depth_bytes, center_depth_m = camera.capture_payloads()
+            header = struct.pack(
+                "!ffffQQ",
+                float(downward_range),
+                float(center_depth_m),
+                float(pitch),
+                float(roll),
+                len(jpeg_bytes),
+                len(depth_bytes),
+            )
+            conn.sendall(header + jpeg_bytes + depth_bytes)
     finally:
         conn.close()
 
+
 def run_server():
-    rf_state = RangefinderState()
-    mav_thread = MavlinkReader(FC_ADDR, rf_state)
+    telemetry_state = TelemetryState()
+    mav_thread = MavlinkReader(FC_ADDR, telemetry_state)
     mav_thread.start()
-    camera = Camera(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
+    camera = OakCamera(FRAME_WIDTH, FRAME_HEIGHT)
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -230,13 +342,14 @@ def run_server():
     try:
         while True:
             conn, addr = server_sock.accept()
-            handle_client(conn, addr, camera, rf_state)
+            handle_client(conn, addr, camera, telemetry_state)
     except KeyboardInterrupt:
         pass
     finally:
         camera.release()
         mav_thread.stop()
         server_sock.close()
+
 
 if __name__ == "__main__":
     run_server()

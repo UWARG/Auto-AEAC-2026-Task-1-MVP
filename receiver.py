@@ -7,6 +7,8 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Optional, Tuple
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 # Click mode for "Generate output" flow
@@ -29,7 +31,7 @@ TRANSMITTER_PORT = 5000
 
 SOCKET_TIMEOUT = 10.0  # seconds
 
-# Camera FOV (radians) for vertical correction of "up" distance
+# Camera FOV (radians) used to project clicked pixels into metric offsets
 CAMERA_HFOV_RAD = 0.64889
 CAMERA_VFOV_RAD = 0.41438
 
@@ -44,13 +46,15 @@ class ReceiverApp:
         self.root.title("Drone Image Receiver")
 
         # GUI elements
-        self.button = tk.Button(root, text="Capture image", command=self.on_capture_clicked)
+        self.button = tk.Button(
+            root, text="Capture image", command=self.on_capture_clicked
+        )
         self.button.pack(pady=8)
 
         self.image_label = tk.Label(root)
         self.image_label.pack(padx=8, pady=8)
 
-        self.range_label = tk.Label(root, text="Downwards: N/A    Forwards: N/A")
+        self.range_label = tk.Label(root, text="Downwards: N/A    Depth(center): N/A")
         self.range_label.pack(pady=(0, 2))
         self.pitch_label = tk.Label(root, text="Pitch: N/A")
         self.pitch_label.pack(pady=(0, 2))
@@ -63,38 +67,57 @@ class ReceiverApp:
         gen_frame = tk.Frame(root)
         gen_frame.pack(pady=8, padx=8, fill=tk.X)
 
-        tk.Label(gen_frame, text="Mode:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        tk.Label(gen_frame, text="Mode:").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 4)
+        )
         self._mode_var = tk.StringVar(value="aided")
         mode_frame = tk.Frame(gen_frame)
         mode_frame.grid(row=0, column=1, sticky=tk.W, pady=2)
         tk.Radiobutton(
-            mode_frame, text="Aided", variable=self._mode_var, value="aided",
+            mode_frame,
+            text="Aided",
+            variable=self._mode_var,
+            value="aided",
             command=self._on_mode_changed,
         ).pack(side=tk.LEFT, padx=(0, 12))
         tk.Radiobutton(
-            mode_frame, text="Full manual", variable=self._mode_var, value="full_manual",
+            mode_frame,
+            text="Full manual",
+            variable=self._mode_var,
+            value="full_manual",
             command=self._on_mode_changed,
         ).pack(side=tk.LEFT)
 
-        tk.Label(gen_frame, text="Target colour:").grid(row=1, column=0, sticky=tk.W, padx=(0, 4))
+        tk.Label(gen_frame, text="Target colour:").grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 4)
+        )
         self._colour_entry = tk.Entry(gen_frame, width=20)
         self._colour_entry.grid(row=1, column=1, sticky=tk.W, pady=2)
 
-        tk.Label(gen_frame, text="Reference description:").grid(row=2, column=0, sticky=tk.W, padx=(0, 4))
+        tk.Label(gen_frame, text="Reference description:").grid(
+            row=2, column=0, sticky=tk.W, padx=(0, 4)
+        )
         self._ref_desc_entry = tk.Entry(gen_frame, width=30)
         self._ref_desc_entry.grid(row=2, column=1, sticky=tk.W, pady=2)
 
-        tk.Label(gen_frame, text="Target:").grid(row=3, column=0, sticky=tk.W, padx=(0, 4))
+        tk.Label(gen_frame, text="Target:").grid(
+            row=3, column=0, sticky=tk.W, padx=(0, 4)
+        )
         self._target_direction = tk.StringVar(value="forwards")
         target_frame = tk.Frame(gen_frame)
         target_frame.grid(row=3, column=1, sticky=tk.W, pady=2)
         tk.Radiobutton(
-            target_frame, text="Forwards", variable=self._target_direction,
+            target_frame,
+            text="Forwards",
+            variable=self._target_direction,
             value="forwards",
         ).pack(side=tk.LEFT, padx=(0, 12))
         self._downwards_radio = tk.Radiobutton(
-            target_frame, text="Downwards", variable=self._target_direction,
-            value="downwards", state=tk.DISABLED,
+            target_frame,
+            text="Downwards",
+            variable=self._target_direction,
+            value="downwards",
+            state=tk.DISABLED,
         )
         self._downwards_radio.pack(side=tk.LEFT)
 
@@ -103,21 +126,28 @@ class ReceiverApp:
 
         btn_frame = tk.Frame(gen_frame)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=4)
-        self._action_btn = tk.Button(btn_frame, text="Generate output", command=self._on_action_clicked)
+        self._action_btn = tk.Button(
+            btn_frame, text="Generate output", command=self._on_action_clicked
+        )
         self._action_btn.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(btn_frame, text="Clear", command=self._on_clear_clicked).pack(side=tk.LEFT)
+        tk.Button(btn_frame, text="Clear", command=self._on_clear_clicked).pack(
+            side=tk.LEFT
+        )
 
-        self._output_text = tk.Text(root, height=4, width=60, wrap=tk.WORD, state=tk.DISABLED)
+        self._output_text = tk.Text(
+            root, height=4, width=60, wrap=tk.WORD, state=tk.DISABLED
+        )
         self._output_text.pack(pady=8, padx=8, fill=tk.X)
 
         # Keep a reference to the last PhotoImage to prevent garbage collection
         self._current_photo: Optional[ImageTk.PhotoImage] = None
         # Base display image (with center dot only) for redrawing with crosshairs
         self._base_display_image: Optional[Image.Image] = None
+        self._base_depth_map: Optional[np.ndarray] = None
 
-        # Last rangefinder readings and attitude (rad) from capture (for generate output)
+        # Last telemetry from capture (for generate output)
         self._last_downwards: Optional[float] = None
-        self._last_forwards: Optional[float] = None
+        self._last_center_depth: Optional[float] = None
         self._last_pitch: Optional[float] = None
         self._last_roll: Optional[float] = None
 
@@ -142,11 +172,22 @@ class ReceiverApp:
 
     def _capture_worker(self) -> None:
         try:
-            range1, range2, pitch, roll, image = self.request_image()
+            downwards_range, center_depth, pitch, roll, image, depth_map = (
+                self.request_image()
+            )
         except Exception as exc:
             self.root.after(0, self._handle_capture_error, exc)
         else:
-            self.root.after(0, self._handle_capture_success, range1, range2, pitch, roll, image)
+            self.root.after(
+                0,
+                self._handle_capture_success,
+                downwards_range,
+                center_depth,
+                pitch,
+                roll,
+                image,
+                depth_map,
+            )
         finally:
             self.root.after(0, self._release_capture_lock)
 
@@ -156,7 +197,9 @@ class ReceiverApp:
 
     def _handle_capture_error(self, exc: Exception) -> None:
         self.capture_status_label.config(text="")
-        messagebox.showerror("Capture failed", f"Failed to capture image from transmitter:\n{exc}")
+        messagebox.showerror(
+            "Capture failed", f"Failed to capture image from transmitter:\n{exc}"
+        )
 
     def _redraw_image_with_crosshairs(self) -> None:
         """Redraw the image from base, adding target (green) and reference (blue) crosshairs."""
@@ -171,8 +214,12 @@ class ReceiverApp:
             draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
         if self._ref_xy is not None:
             rx, ry = self._ref_xy
-            draw.line((rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2)
-            draw.line((rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2)
+            draw.line(
+                (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+            )
+            draw.line(
+                (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+            )
         self._current_photo = ImageTk.PhotoImage(image=img)
         self.image_label.config(image=self._current_photo)
 
@@ -218,7 +265,9 @@ class ReceiverApp:
         self._click_mode = SELECT_TARGET
         self._target_xy = None
         self._ref_xy = None
-        self._gen_prompt_label.config(text="Select target center", fg=TARGET_CROSSHAIR_COLOUR)
+        self._gen_prompt_label.config(
+            text="Select target center", fg=TARGET_CROSSHAIR_COLOUR
+        )
         self._redraw_image_with_crosshairs()
         self.image_label.bind("<Button-1>", self._on_image_click)
 
@@ -227,77 +276,124 @@ class ReceiverApp:
         self._click_mode = SELECT_TARGET
         self._target_xy = None
         self._ref_xy = None
-        self._gen_prompt_label.config(text="Select first point", fg=TARGET_CROSSHAIR_COLOUR)
+        self._gen_prompt_label.config(
+            text="Select first point", fg=TARGET_CROSSHAIR_COLOUR
+        )
         self._redraw_image_with_crosshairs()
         self.image_label.bind("<Button-1>", self._on_image_click)
 
+    @staticmethod
+    def _rotate_depth_map(depth_map: np.ndarray, angle_deg: float) -> np.ndarray:
+        height, width = depth_map.shape[:2]
+        center = (width / 2.0, height / 2.0)
+        matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+        cos = abs(matrix[0, 0])
+        sin = abs(matrix[0, 1])
+
+        new_width = int((height * sin) + (width * cos))
+        new_height = int((height * cos) + (width * sin))
+        matrix[0, 2] += (new_width / 2) - center[0]
+        matrix[1, 2] += (new_height / 2) - center[1]
+
+        return cv2.warpAffine(
+            depth_map,
+            matrix,
+            (new_width, new_height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+    def _sample_depth_m(self, x: int, y: int, radius: int = 4) -> Optional[float]:
+        if self._base_depth_map is None:
+            return None
+        height, width = self._base_depth_map.shape[:2]
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return None
+        x0 = max(0, x - radius)
+        x1 = min(width, x + radius + 1)
+        y0 = max(0, y - radius)
+        y1 = min(height, y + radius + 1)
+        patch = self._base_depth_map[y0:y1, x0:x1]
+        valid = patch[patch > 0]
+        if valid.size == 0:
+            return None
+        return float(np.median(valid) / 1000.0)
+
     def _compute_corrected_up_m(self) -> Optional[float]:
         """
-        Corrected 'up' distance (m): downwards rangefinder minus the vertical offset of the
-        target from the drone, using the vertical FOV and the forwards rangefinder
-        distance. For robustness with real hardware (camera and sensor not perfectly
-        coaligned), this ignores pitch in the vertical term so altitude stays stable
-        when only pitch changes.
+        Corrected 'up' distance (m): downward rangefinder minus the vertical offset of the
+        target from the drone, using the target's sampled OAK-D depth and the vertical FOV.
         Returns None if readings or image are missing/invalid.
         """
         if self._base_display_image is None or self._target_xy is None:
             return None
         d_down = self._last_downwards
-        d_forward = self._last_forwards
-        if d_down is None or d_forward is None:
+        tx, ty = self._target_xy
+        target_depth = self._sample_depth_m(tx, ty)
+        if d_down is None or target_depth is None:
             return None
-        if d_down != d_down or d_forward != d_forward:  # NaN
+        if d_down != d_down or target_depth != target_depth:  # NaN
             return None
         H = self._base_display_image.height
-        tx, ty = self._target_xy
         # Vertical angle from image center (rad): positive when target below center
         half_vfov = CAMERA_VFOV_RAD / 2
         angle_v = (ty - H / 2) / (H / 2) * half_vfov
         angle_v = angle_v * (1.0 + FISHEYE_EDGE_FACTOR * (angle_v / half_vfov) ** 2)
-        # Treat forwards range as distance to the target plane; vertical offset comes
-        # purely from the vertical image angle so that changing pitch alone does not
-        # change the computed 'up' value for a fixed visual target.
-        delta_h = d_forward * math.tan(angle_v)
+        delta_h = target_depth * math.tan(angle_v)
         return d_down - delta_h
 
     def _compute_lateral_offset_m(self) -> Optional[float]:
         """
-        Horizontal distance (m) of the target from the reference, using horizontal FOV
-        and forwards rangefinder. Positive = target to the right of reference in image.
+        Horizontal distance (m) of the target from the reference, using each point's
+        sampled OAK-D depth and the horizontal FOV. Positive = target to the right
+        of reference in image.
         Returns None if cannot compute.
         """
-        if self._base_display_image is None or self._target_xy is None or self._ref_xy is None:
-            return None
-        d_forward = self._last_forwards
-        if d_forward is None or d_forward != d_forward:
+        if (
+            self._base_display_image is None
+            or self._target_xy is None
+            or self._ref_xy is None
+        ):
             return None
         W = self._base_display_image.width
         tx, ty = self._target_xy
         rx, ry = self._ref_xy
+        target_depth = self._sample_depth_m(tx, ty)
+        ref_depth = self._sample_depth_m(rx, ry)
+        if target_depth is None or ref_depth is None:
+            return None
         half_hfov = CAMERA_HFOV_RAD / 2
         angle_tx = (tx - W / 2) / (W / 2) * half_hfov
         angle_rx = (rx - W / 2) / (W / 2) * half_hfov
         angle_tx = angle_tx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_tx / half_hfov) ** 2)
         angle_rx = angle_rx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_rx / half_hfov) ** 2)
-        # Lateral offset in metres at range d_forward (signed: positive = target right of reference)
-        return d_forward * (math.tan(angle_tx) - math.tan(angle_rx))
+        target_x_m = target_depth * math.tan(angle_tx)
+        ref_x_m = ref_depth * math.tan(angle_rx)
+        return target_x_m - ref_x_m
 
     def _compute_delta_up_sideways_m(
         self,
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         Distance up (vertical) and sideways (horizontal) in metres between the two
-        selected points (point 1 = target_xy, point 2 = ref_xy). Uses FOV and forwards range.
+        selected points (point 1 = target_xy, point 2 = ref_xy). Uses FOV and
+        sampled OAK-D depth at each point.
         Returns (delta_up_m, delta_sideways_m); either can be None if unavailable.
         """
-        if self._base_display_image is None or self._target_xy is None or self._ref_xy is None:
-            return None, None
-        d_forward = self._last_forwards
-        if d_forward is None or d_forward != d_forward:
+        if (
+            self._base_display_image is None
+            or self._target_xy is None
+            or self._ref_xy is None
+        ):
             return None, None
         W, H = self._base_display_image.width, self._base_display_image.height
         x1, y1 = self._target_xy
         x2, y2 = self._ref_xy
+        depth1 = self._sample_depth_m(x1, y1)
+        depth2 = self._sample_depth_m(x2, y2)
+        if depth1 is None or depth2 is None:
+            return None, None
         half_vfov = CAMERA_VFOV_RAD / 2
         half_hfov = CAMERA_HFOV_RAD / 2
         # Vertical angles (rad)
@@ -305,13 +401,13 @@ class ReceiverApp:
         a2 = (y2 - H / 2) / (H / 2) * half_vfov
         a1 = a1 * (1.0 + FISHEYE_EDGE_FACTOR * (a1 / half_vfov) ** 2)
         a2 = a2 * (1.0 + FISHEYE_EDGE_FACTOR * (a2 / half_vfov) ** 2)
-        delta_up = d_forward * (math.tan(a2) - math.tan(a1))
+        delta_up = (depth2 * math.tan(a2)) - (depth1 * math.tan(a1))
         # Horizontal angles (rad)
         b1 = (x1 - W / 2) / (W / 2) * half_hfov
         b2 = (x2 - W / 2) / (W / 2) * half_hfov
         b1 = b1 * (1.0 + FISHEYE_EDGE_FACTOR * (b1 / half_hfov) ** 2)
         b2 = b2 * (1.0 + FISHEYE_EDGE_FACTOR * (b2 / half_hfov) ** 2)
-        delta_sideways = d_forward * (math.tan(b2) - math.tan(b1))
+        delta_sideways = (depth2 * math.tan(b2)) - (depth1 * math.tan(b1))
         return delta_up, delta_sideways
 
     def _draw_manual_measurements(self) -> None:
@@ -328,8 +424,12 @@ class ReceiverApp:
             draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
         if self._ref_xy is not None:
             rx, ry = self._ref_xy
-            draw.line((rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2)
-            draw.line((rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2)
+            draw.line(
+                (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+            )
+            draw.line(
+                (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+            )
         up_str = f"{delta_up:.2f} m" if delta_up is not None else "N/A"
         side_str = f"{delta_sideways:.2f} m" if delta_sideways is not None else "N/A"
         try:
@@ -346,7 +446,10 @@ class ReceiverApp:
         corrected_up = self._compute_corrected_up_m()
         if corrected_up is not None:
             downwards_str = f"{corrected_up:.2f} m"
-        elif self._last_downwards is not None and self._last_downwards == self._last_downwards:
+        elif (
+            self._last_downwards is not None
+            and self._last_downwards == self._last_downwards
+        ):
             downwards_str = f"{self._last_downwards:.2f} m"
         else:
             downwards_str = "N/A"
@@ -375,9 +478,13 @@ class ReceiverApp:
             self._redraw_image_with_crosshairs()
             self._click_mode = SELECT_REFERENCE
             if self._mode_var.get() == "full_manual":
-                self._gen_prompt_label.config(text="Select second point", fg=REFERENCE_CROSSHAIR_COLOUR)
+                self._gen_prompt_label.config(
+                    text="Select second point", fg=REFERENCE_CROSSHAIR_COLOUR
+                )
             else:
-                self._gen_prompt_label.config(text="Select reference point", fg=REFERENCE_CROSSHAIR_COLOUR)
+                self._gen_prompt_label.config(
+                    text="Select reference point", fg=REFERENCE_CROSSHAIR_COLOUR
+                )
             return
         if self._click_mode == SELECT_REFERENCE:
             self._ref_xy = (event.x, event.y)
@@ -394,19 +501,24 @@ class ReceiverApp:
                 )
 
     def _handle_capture_success(
-        self, range1: float, range2: float, pitch: float, roll: float, image: Image.Image
+        self,
+        downwards_range: float,
+        center_depth: float,
+        pitch: float,
+        roll: float,
+        image: Image.Image,
+        depth_map: np.ndarray,
     ) -> None:
-        # Update rangefinder label
         def fmt(v: float) -> str:
             if v != v:  # NaN check
                 return "N/A"
             return f"{v:.2f} m"
 
         self.range_label.config(
-            text=f"Downwards: {fmt(range1)}    Forwards: {fmt(range2)}"
+            text=f"Downwards: {fmt(downwards_range)}    Depth(center): {fmt(center_depth)}"
         )
-        self._last_downwards = range1
-        self._last_forwards = range2
+        self._last_downwards = downwards_range
+        self._last_center_depth = center_depth
         self._last_pitch = pitch if pitch == pitch else None
         self._last_roll = roll if roll == roll else None
         if self._last_pitch is None:
@@ -425,10 +537,14 @@ class ReceiverApp:
 
         # Rotate image to remove roll before any geometric calculations.
         display_image = image.copy()
+        rotated_depth_map = depth_map.copy()
         if self._last_roll is not None:
             # Negative roll de-rotates the image so the horizon appears level.
             roll_deg = math.degrees(self._last_roll)
-            display_image = display_image.rotate(-roll_deg, expand=True, resample=Image.BICUBIC)
+            display_image = display_image.rotate(
+                -roll_deg, expand=True, resample=Image.BICUBIC
+            )
+            rotated_depth_map = self._rotate_depth_map(rotated_depth_map, -roll_deg)
 
         # Draw red dot in center of (possibly rotated) image
         draw = ImageDraw.Draw(display_image)
@@ -437,49 +553,70 @@ class ReceiverApp:
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="red", outline="red")
 
         self._base_display_image = display_image.copy()
+        self._base_depth_map = rotated_depth_map
         # Update image display
         photo = ImageTk.PhotoImage(image=display_image)
         self._current_photo = photo
         self.image_label.config(image=photo)
 
-    def request_image(self) -> Tuple[float, float, float, float, Image.Image]:
+    def request_image(
+        self,
+    ) -> Tuple[float, float, float, float, Image.Image, np.ndarray]:
         """
         Connects to the transmitter, sends a capture command, and receives:
-        - range1 (float32), range2 (float32), pitch (float32 rad), roll (float32 rad), image length (uint64)
-        - JPEG image bytes
-        Returns (range1_m, range2_m, pitch_rad, roll_rad, PIL.Image).
+        - downward range (float32), center depth (float32), pitch (float32 rad), roll (float32 rad)
+        - RGB JPEG length (uint64), depth PNG length (uint64)
+        - JPEG image bytes, 16-bit PNG depth bytes
+        Returns (downward_range_m, center_depth_m, pitch_rad, roll_rad, PIL.Image, depth_map_mm).
         """
-        with socket.create_connection((TRANSMITTER_HOST, TRANSMITTER_PORT), timeout=SOCKET_TIMEOUT) as sock:
+        with socket.create_connection(
+            (TRANSMITTER_HOST, TRANSMITTER_PORT), timeout=SOCKET_TIMEOUT
+        ) as sock:
             sock.settimeout(SOCKET_TIMEOUT)
 
             # Send 1-byte capture command
             sock.sendall(b"C")
 
-            # Receive header: 4 x float32 + length (uint64) = 24 bytes
-            header = self._recv_exact(sock, 24)
-            if len(header) != 24:
-                raise RuntimeError(f"Incomplete header received (expected 24 bytes, got {len(header)})")
-
-            range1, range2, pitch, roll, length = struct.unpack("!ffffQ", header)
-
-            if length == 0:
-                raise RuntimeError("Transmitter reported zero-length image")
-
-            # Receive JPEG bytes
-            jpeg_bytes = self._recv_exact(sock, length)
-            if len(jpeg_bytes) != length:
+            header = self._recv_exact(sock, 32)
+            if len(header) != 32:
                 raise RuntimeError(
-                    f"Incomplete image received (expected {length} bytes, got {len(jpeg_bytes)})"
+                    f"Incomplete header received (expected 32 bytes, got {len(header)})"
                 )
 
-        # Decode JPEG into PIL Image
+            downwards_range, center_depth, pitch, roll, image_length, depth_length = (
+                struct.unpack("!ffffQQ", header)
+            )
+
+            if image_length == 0:
+                raise RuntimeError("Transmitter reported zero-length image")
+            if depth_length == 0:
+                raise RuntimeError("Transmitter reported zero-length depth map")
+
+            jpeg_bytes = self._recv_exact(sock, image_length)
+            if len(jpeg_bytes) != image_length:
+                raise RuntimeError(
+                    f"Incomplete image received (expected {image_length} bytes, got {len(jpeg_bytes)})"
+                )
+            depth_bytes = self._recv_exact(sock, depth_length)
+            if len(depth_bytes) != depth_length:
+                raise RuntimeError(
+                    f"Incomplete depth map received (expected {depth_length} bytes, got {len(depth_bytes)})"
+                )
+
         try:
             image = Image.open(io.BytesIO(jpeg_bytes))
             image.load()
         except Exception as exc:
             raise RuntimeError(f"Failed to decode JPEG image: {exc}") from exc
 
-        return range1, range2, pitch, roll, image
+        depth_buffer = np.frombuffer(depth_bytes, dtype=np.uint8)
+        depth_map = cv2.imdecode(depth_buffer, cv2.IMREAD_UNCHANGED)
+        if depth_map is None:
+            raise RuntimeError("Failed to decode depth PNG")
+        if depth_map.ndim != 2:
+            raise RuntimeError(f"Depth map has unexpected shape: {depth_map.shape}")
+
+        return downwards_range, center_depth, pitch, roll, image, depth_map
 
     @staticmethod
     def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
@@ -503,4 +640,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
