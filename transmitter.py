@@ -25,9 +25,11 @@ FRAME_HEIGHT = 360
 JPEG_QUALITY = 90
 DEPTH_PNG_COMPRESSION = 3
 
-# Flight Controller UDP Settings
-# format: "udpout:IP_ADDRESS:PORT"
+# Flight Controller Connection Settings
+# For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
+# For UDP (e.g. SITL or network): "udpout:IP_ADDRESS:PORT"
 FC_ADDR = "/dev/ttyAMA0"
+FC_BAUD = 921600  # Default for most Pixhawk-to-Pi links
 
 # How long to wait for MAVLink messages before giving up (seconds)
 MAVLINK_TIMEOUT = 1.0
@@ -78,7 +80,7 @@ class TelemetryState:
 
 
 class MavlinkReader(threading.Thread):
-    """Background thread to read MAVLink via UDP."""
+    """Background thread to read MAVLink via Serial or UDP."""
 
     def __init__(self, connection_str: str, state: TelemetryState) -> None:
         super().__init__(daemon=True)
@@ -97,6 +99,7 @@ class MavlinkReader(threading.Thread):
         sys_id = self._mav.target_system
         comp_id = self._mav.target_component
 
+        # Try modern SET_MESSAGE_INTERVAL method
         requests = [
             ("RANGEFINDER", mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER, 100_000),
             (
@@ -121,32 +124,39 @@ class MavlinkReader(threading.Thread):
                 0,
                 0,
             )
-            logging.info(
-                f"Requested {name} via UDP at {1_000_000 / interval_us:.1f} Hz"
-            )
+        
+        # Fallback: legacy request stream for older ArduPilot versions
+        # MAV_DATA_STREAM_EXTRA1 includes ATTITUDE
+        mav.request_data_stream_send(
+            sys_id, comp_id,
+            mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+            5, # 5 Hz fallback
+            1  # Start
+        )
+        logging.info("Requested telemetry streams (Modern & Legacy)")
 
     def run(self) -> None:
         try:
-            logging.info(f"Connecting to FC MAVLink via UDP: {self.connection_str}")
-            # UDP doesn't need a baud rate
+            logging.info(f"Connecting to FC MAVLink: {self.connection_str}")
+            # Use FC_BAUD if it's a serial connection
             self._mav = mavutil.mavlink_connection(
-                self.connection_str, dialect="ardupilotmega"
+                self.connection_str, baud=FC_BAUD, dialect="ardupilotmega"
             )
         except Exception as exc:
-            logging.error(f"UDP Connection failed: {exc}")
+            logging.error(f"MAVLink Connection failed: {exc}")
             return
 
         mav = self._mav
         if mav is None:
-            logging.error("UDP Connection failed: no MAVLink handle")
+            logging.error("MAVLink Connection failed: no handle")
             return
 
-        logging.info("Waiting for UDP Heartbeat...")
+        logging.info("Waiting for Heartbeat...")
         try:
             mav.wait_heartbeat(timeout=10)
-            logging.info(f"Heartbeat received from {mav.target_system}")
+            logging.info(f"Heartbeat received from system {mav.target_system}")
         except:
-            logging.warning("No heartbeat. Ensure FC is powered and IP is correct.")
+            logging.warning("No heartbeat. Ensure FC is powered and baud rate/port is correct.")
 
         try:
             self._request_telemetry_streams()
