@@ -27,7 +27,7 @@ DEPTH_PNG_COMPRESSION = 3
 
 # Flight Controller UDP Settings
 # format: "udpout:IP_ADDRESS:PORT"
-FC_ADDR = "udpout:192.168.144.14:14550"
+FC_ADDR = "/dev/ttyAMA0"
 
 # How long to wait for MAVLink messages before giving up (seconds)
 MAVLINK_TIMEOUT = 1.0
@@ -230,7 +230,9 @@ class OakCamera:
         try:
             pipeline, rgb_output, depth_output = self._build_pipeline()
             self._rgb_queue = rgb_output.createOutputQueue(maxSize=2, blocking=False)
-            self._depth_queue = depth_output.createOutputQueue(maxSize=2, blocking=False)
+            self._depth_queue = depth_output.createOutputQueue(
+                maxSize=2, blocking=False
+            )
             pipeline.start()
             self._pipeline = pipeline
         except Exception as exc:
