@@ -32,8 +32,8 @@ TRANSMITTER_PORT = 5000
 SOCKET_TIMEOUT = 10.0  # seconds
 
 # Camera FOV (radians) used to project clicked pixels into metric offsets
-CAMERA_HFOV_RAD = 0.64889
-CAMERA_VFOV_RAD = 0.41438
+CAMERA_HFOV_RAD = math.radians(80)
+CAMERA_VFOV_RAD = math.radians(55)
 
 # Fisheye correction (only near the edges). Correction = 1 + this * (angle / edge_angle)^2.
 # 0.0 = no correction. Use e.g. 0.1–0.3 if the lens compresses angles toward the edges.
