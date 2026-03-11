@@ -29,7 +29,7 @@ DEPTH_PNG_COMPRESSION = 3
 # For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
 # For UDP (e.g. SITL or network): "udpout:IP_ADDRESS:PORT"
 FC_ADDR = "/dev/ttyAMA0"
-FC_BAUD = 921600  # Default for most Pixhawk-to-Pi links
+FC_BAUD = 57600
 
 # How long to wait for MAVLink messages before giving up (seconds)
 MAVLINK_TIMEOUT = 1.0
@@ -124,14 +124,15 @@ class MavlinkReader(threading.Thread):
                 0,
                 0,
             )
-        
+
         # Fallback: legacy request stream for older ArduPilot versions
         # MAV_DATA_STREAM_EXTRA1 includes ATTITUDE
         mav.request_data_stream_send(
-            sys_id, comp_id,
+            sys_id,
+            comp_id,
             mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
-            5, # 5 Hz fallback
-            1  # Start
+            5,  # 5 Hz fallback
+            1,  # Start
         )
         logging.info("Requested telemetry streams (Modern & Legacy)")
 
@@ -156,7 +157,9 @@ class MavlinkReader(threading.Thread):
             mav.wait_heartbeat(timeout=10)
             logging.info(f"Heartbeat received from system {mav.target_system}")
         except:
-            logging.warning("No heartbeat. Ensure FC is powered and baud rate/port is correct.")
+            logging.warning(
+                "No heartbeat. Ensure FC is powered and baud rate/port is correct."
+            )
 
         try:
             self._request_telemetry_streams()
@@ -272,8 +275,8 @@ class OakCamera:
         with self._lock:
             if self._latest_rgb is None or self._latest_depth is None:
                 return b"", b"", float("nan")
-            rgb_frame = cv2.flip(self._latest_rgb, -1)
-            depth_frame = cv2.flip(self._latest_depth, -1)
+            rgb_frame = self._latest_rgb
+            depth_frame = self._latest_depth
 
         ok_jpeg, jpeg_buf = cv2.imencode(
             ".jpg",

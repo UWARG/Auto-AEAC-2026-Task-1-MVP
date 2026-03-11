@@ -113,7 +113,6 @@ Behavior:
 ## Notes and assumptions
 
 - The transmitter currently handles one TCP client at a time.
-- The OAK-D RGB image and aligned depth map are both flipped before transmission.
 - If pitch data is not available, the transmitter will wait indefinitely for a level state before capturing.
 - `receiver.py` assumes the first transmitted float is downward distance and the second is the center depth estimate.
 - The receiver de-rotates both the image and depth map using the reported roll before performing measurements.
