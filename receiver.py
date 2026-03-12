@@ -144,6 +144,7 @@ class ReceiverApp:
         # Base display image (with center dot only) for redrawing with crosshairs
         self._base_display_image: Optional[Image.Image] = None
         self._base_depth_map: Optional[np.ndarray] = None
+        self._base_display_image_arducam:Optional[Image.Image] = None
 
         # Last telemetry from capture (for generate output)
         self._last_downwards: Optional[float] = None
@@ -172,7 +173,7 @@ class ReceiverApp:
 
     def _capture_worker(self) -> None:
         try:
-            downwards_range, center_depth, pitch, roll, image, depth_map = (
+            downwards_range, center_depth, pitch, roll, image,image2, depth_map = (
                 self.request_image()
             )
         except Exception as exc:
@@ -186,6 +187,7 @@ class ReceiverApp:
                 pitch,
                 roll,
                 image,
+                image2,
                 depth_map,
             )
         finally:
@@ -507,6 +509,7 @@ class ReceiverApp:
         pitch: float,
         roll: float,
         image: Image.Image,
+        image2: Image.Image,
         depth_map: np.ndarray,
     ) -> None:
         def fmt(v: float) -> str:
@@ -537,6 +540,7 @@ class ReceiverApp:
 
         # Rotate image to remove roll before any geometric calculations.
         display_image = image.copy()
+        display_image2=image2.copy()
         rotated_depth_map = depth_map.copy()
         if self._last_roll is not None:
             # Negative roll de-rotates the image so the horizon appears level.
@@ -544,17 +548,28 @@ class ReceiverApp:
             display_image = display_image.rotate(
                 -roll_deg, expand=True, resample=Image.BICUBIC
             )
+            display_image2=display_image.rotate(
+                -roll_deg, expand=True, resample=Image.BICUBIC
+            )
             rotated_depth_map = self._rotate_depth_map(rotated_depth_map, -roll_deg)
 
         # Draw red dot in center of (possibly rotated) image
         draw = ImageDraw.Draw(display_image)
+        draw2=ImageDraw.Draw(display_image2)
         cx, cy = display_image.width // 2, display_image.height // 2
+        cx2,cy2=display_image2.width//2,display_image2.height//2
         r = 2  # radius in pixels
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="red", outline="red")
+        draw.ellipse([cx-r,cy-r,cx+r,cy+r])
+
 
         self._base_display_image = display_image.copy()
         self._base_depth_map = rotated_depth_map
+        self._base_display_image_arducam=display_image2.copy()
         # Update image display
+
+
+        #TO IMPLEMENT GUI ARDUCAM!
         photo = ImageTk.PhotoImage(image=display_image)
         self._current_photo = photo
         self.image_label.config(image=photo)
@@ -583,29 +598,38 @@ class ReceiverApp:
                     f"Incomplete header received (expected 32 bytes, got {len(header)})"
                 )
 
-            downwards_range, center_depth, pitch, roll, image_length, depth_length = (
-                struct.unpack("!ffffQQ", header)
+            downwards_range, center_depth, pitch, roll, image_length, depth_length, ardu_image_length = (
+                struct.unpack("!ffffQQQ", header)
             )
 
             if image_length == 0:
-                raise RuntimeError("Transmitter reported zero-length image")
+                raise RuntimeError("Transmitter reported zero-length image from oak-d")
             if depth_length == 0:
                 raise RuntimeError("Transmitter reported zero-length depth map")
+            if ardu_image_length==0:
+                raise RuntimeError("Transmitter reported zero-length image from arducam")
 
             jpeg_bytes = self._recv_exact(sock, image_length)
             if len(jpeg_bytes) != image_length:
                 raise RuntimeError(
-                    f"Incomplete image received (expected {image_length} bytes, got {len(jpeg_bytes)})"
+                    f"Incomplete oakd image received (expected {image_length} bytes, got {len(jpeg_bytes)})"
                 )
             depth_bytes = self._recv_exact(sock, depth_length)
             if len(depth_bytes) != depth_length:
                 raise RuntimeError(
                     f"Incomplete depth map received (expected {depth_length} bytes, got {len(depth_bytes)})"
                 )
+            ardu_image_bytes=self._recv_exact(sock,ardu_image_length)
+            if len(ardu_image_bytes)!=ardu_image_length:
+                raise RuntimeError(
+                    f"Incomplete arducam image received (expected {ardu_image_length} bytes, got {len(ardu_image_bytes)})"
+                )
 
         try:
             image = Image.open(io.BytesIO(jpeg_bytes))
             image.load()
+            image2=Image.open(io.BytesIO(ardu_image_bytes))
+            image2.load()
         except Exception as exc:
             raise RuntimeError(f"Failed to decode JPEG image: {exc}") from exc
 
@@ -616,7 +640,7 @@ class ReceiverApp:
         if depth_map.ndim != 2:
             raise RuntimeError(f"Depth map has unexpected shape: {depth_map.shape}")
 
-        return downwards_range, center_depth, pitch, roll, image, depth_map
+        return downwards_range, center_depth, pitch, roll, image,image2, depth_map
 
     @staticmethod
     def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
