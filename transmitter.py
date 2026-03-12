@@ -25,6 +25,10 @@ FRAME_HEIGHT = 360
 JPEG_QUALITY = 90
 DEPTH_PNG_COMPRESSION = 3
 
+#ArduCam
+ARDU_WIDTH=640
+ARDU_HEIGHT=360
+
 # Flight Controller Connection Settings
 # For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
 # For UDP (e.g. SITL or network): "udpout:IP_ADDRESS:PORT"
@@ -311,7 +315,45 @@ class OakCamera:
             self._pipeline.stop()
 
 
-def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState):
+class Arducam:
+    def __init__(self,height,width):
+        self.height=height
+        self.width=width
+        self.lock=threading.Lock()
+        self.last_frame=None
+        self._stop_event = threading.Event()
+        self.cap=cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,height)
+        self.thread=threading.Thread(target=self._capture_loop,daemon=True)
+        self.thread.start()
+
+    def _capture_loop(self):
+        while not self._stop_event.is_set():
+            ret,frame=self.cap.read()
+            if not ret:
+                time.sleep(0.01)
+            else:
+                with self.lock:
+                    self.last_frame=frame
+    
+    def release(self):
+        self._stop_event.set()
+        self.cap.release()
+        if self.thread.is_alive():
+            self.thread.join()
+    
+    def capture_payloads(self):
+        with self.lock:
+            frame=self.last_frame.copy()
+            if frame is None:
+                return b""
+        result,jpeg=cv2.imencode(".jpg",frame,[int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+        if not result:
+            return b""
+        return jpeg.tobytes()
+
+def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state: TelemetryState):
     try:
         if conn.recv(1) == b"C":
             # Wait until pitch is within tolerance of level before capturing.
@@ -321,20 +363,23 @@ def handle_client(conn, addr, camera: OakCamera, telemetry_state: TelemetryState
                     break
                 # Update at ~50 Hz while waiting for level
                 time.sleep(0.02)
-
+            jpeg_bytes_ardu=camera2.capture_payloads()
             jpeg_bytes, depth_bytes, center_depth_m = camera.capture_payloads()
             header = struct.pack(
-                "!ffffQQ",
+                "!ffffQQQ",
                 float(downward_range),
                 float(center_depth_m),
                 float(pitch),
                 float(roll),
                 len(jpeg_bytes),
                 len(depth_bytes),
+                len(jpeg_bytes_ardu)
             )
-            conn.sendall(header + jpeg_bytes + depth_bytes)
+            conn.sendall(header + jpeg_bytes + depth_bytes + jpeg_bytes_ardu)
     finally:
         conn.close()
+
+        
 
 
 def run_server():
@@ -342,7 +387,7 @@ def run_server():
     mav_thread = MavlinkReader(FC_ADDR, telemetry_state)
     mav_thread.start()
     camera = OakCamera(FRAME_WIDTH, FRAME_HEIGHT)
-
+    camera_down=Arducam(ARDU_HEIGHT,ARDU_WIDTH)
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind((HOST, PORT))
@@ -352,7 +397,7 @@ def run_server():
     try:
         while True:
             conn, addr = server_sock.accept()
-            handle_client(conn, addr, camera, telemetry_state)
+            handle_client(conn, addr, camera,camera_down, telemetry_state)
     except KeyboardInterrupt:
         pass
     finally:
