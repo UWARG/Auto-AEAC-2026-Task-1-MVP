@@ -11,7 +11,8 @@ import numpy as np
 import cv2
 import logging
 import time
-from typing import Literal, List, Tuple
+from pathlib import Path
+from typing import Literal, List, Tuple, Sequence
 
 from warg_common.simulator import SimCamera
 
@@ -34,10 +35,25 @@ class Camera:
     Handles Raspberry Pi Camera Module 2 operations
     """
 
+    OAK_FRAME_SIZE = (640, 480)
+    OAK_RGB_STREAM_NAME = "oak_rgb"
+    OAK_DET_STREAM_NAME = "oak_detections"
     # Default camera settings optimized for IR beacon detection
     DEFAULT_EXPOSURE_TIME = 15  # microseconds - very fast to reduce motion blur
     DEFAULT_ANALOGUE_GAIN = 16.0  # high gain to amplify IR beacon signal
     DEFAULT_AUTO_EXPOSURE = False  # disable to maintain consistent brightness
+    DEFAULT_OAK_CONFIDENCE_THRESHOLD = 0.5
+    DEFAULT_OAK_IOU_THRESHOLD = 0.5
+    DEFAULT_OAK_COORDINATE_SIZE = 4
+    # Replace this map when the landing-pad model is swapped for the AEAC target model.
+    DEFAULT_OAK_LABEL_MAP = (
+        Colours.RED,
+        Colours.GREEN,
+        Colours.BLUE,
+        Colours.YELLOW,
+        Colours.WHITE,
+        Colours.BLACK,
+    )
 
     def __init__(
         self,
@@ -48,6 +64,14 @@ class Camera:
         mode: Literal["rpi", "webcam", "sim", "oakd", "dummy"] = "rpi",
         mav_comm=None,
         use_oak_inference: bool = True,
+        oak_model_path: str | Path | None = None,
+        oak_label_map: Sequence[Colours] | None = None,
+        oak_confidence_threshold: float = DEFAULT_OAK_CONFIDENCE_THRESHOLD,
+        oak_iou_threshold: float = DEFAULT_OAK_IOU_THRESHOLD,
+        oak_coordinate_size: int = DEFAULT_OAK_COORDINATE_SIZE,
+        oak_num_classes: int | None = None,
+        oak_anchors: Sequence[float] | None = None,
+        oak_anchor_masks: dict[str, list[int]] | None = None,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -70,8 +94,19 @@ class Camera:
         self.use_oak_inference = use_oak_inference
         # OAK-D specific state
         self._oakd_pipeline = None
+        self._oakd_device = None
         self._oakd_current_frame = None
         self._oakd_queue = None
+        self.det_queue = None
+        self._oakd_has_detection_network = False
+        self.oak_model_path = Path(oak_model_path) if oak_model_path else None
+        self.oak_label_map = tuple(oak_label_map or self.DEFAULT_OAK_LABEL_MAP)
+        self.oak_confidence_threshold = oak_confidence_threshold
+        self.oak_iou_threshold = oak_iou_threshold
+        self.oak_coordinate_size = oak_coordinate_size
+        self.oak_num_classes = oak_num_classes or len(self.oak_label_map)
+        self.oak_anchors = list(oak_anchors) if oak_anchors else None
+        self.oak_anchor_masks = dict(oak_anchor_masks) if oak_anchor_masks else None
         print("mode", self.mode)
 
         # Retry camera initialization
@@ -127,11 +162,28 @@ class Camera:
 
             try:
                 self._oakd_pipeline = dai.Pipeline()
-                cam = self._oakd_pipeline.create(dai.node.Camera).build()
-                self._oakd_queue = cam.requestOutput(
-                    (640, 480), dai.ImgFrame.Type.BGR888p
-                ).createOutputQueue(maxSize=4, blocking=False)
-                self._oakd_pipeline.start()
+                cam_rgb = self._oakd_pipeline.create(dai.node.ColorCamera)
+                cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+                cam_rgb.setPreviewSize(*self.OAK_FRAME_SIZE)
+                cam_rgb.setInterleaved(False)
+                cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+
+                xout_rgb = self._oakd_pipeline.create(dai.node.XLinkOut)
+                xout_rgb.setStreamName(self.OAK_RGB_STREAM_NAME)
+                cam_rgb.preview.link(xout_rgb.input)
+
+                self._oakd_has_detection_network = False
+                if self.use_oak_inference:
+                    self._configure_oak_detection_network(dai, cam_rgb)
+
+                self._oakd_device = dai.Device(self._oakd_pipeline)
+                self._oakd_queue = self._oakd_device.getOutputQueue(
+                    name=self.OAK_RGB_STREAM_NAME, maxSize=4, blocking=False
+                )
+                if self._oakd_has_detection_network:
+                    self.det_queue = self._oakd_device.getOutputQueue(
+                        name=self.OAK_DET_STREAM_NAME, maxSize=4, blocking=False
+                    )
                 logging.info(f"OAK-D camera initialized successfully")
                 return True
             except Exception as e:
@@ -267,7 +319,7 @@ class Camera:
         Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
-            logging.warning("Invalid frame provided to colour_in_frame method")
+            logging.warning("Invalid frame provided to find_targets method")
             return []
 
         # If flag is true then use OAK-D detection, otherwise use CV2 (defaults to OAK-D)
@@ -276,41 +328,102 @@ class Camera:
         else:
             return self._find_targets_cv2(frame)
 
+    def _configure_oak_detection_network(self, dai, cam_rgb) -> None:
+        """
+        Configure the OAK-D YOLO detection network if a supported model export exists.
+        """
+        if self.oak_model_path is None:
+            logging.warning(
+                "OAK inference enabled, but no exported model path was provided. "
+                "Set oak_model_path to a DepthAI-compatible .blob export."
+            )
+            return
+
+        if self.oak_model_path.suffix.lower() == ".pt":
+            logging.warning(
+                "DepthAI cannot load a raw .pt model directly. Export the landing-pad "
+                "model to a DepthAI-compatible .blob, then update oak_model_path."
+            )
+            return
+
+        if not self.oak_model_path.exists():
+            logging.warning(
+                "OAK model blob not found at %s. Detection network will not be enabled.",
+                self.oak_model_path,
+            )
+            return
+
+        yolo_det = self._oakd_pipeline.create(dai.node.YoloDetectionNetwork)
+        yolo_det.setBlobPath(str(self.oak_model_path))
+        yolo_det.setConfidenceThreshold(self.oak_confidence_threshold)
+        yolo_det.setNumClasses(self.oak_num_classes)
+        yolo_det.setCoordinateSize(self.oak_coordinate_size)
+        yolo_det.setIouThreshold(self.oak_iou_threshold)
+        yolo_det.input.setBlocking(False)
+
+        if self.oak_anchors:
+            yolo_det.setAnchors(self.oak_anchors)
+        if self.oak_anchor_masks:
+            yolo_det.setAnchorMasks(self.oak_anchor_masks)
+
+        xout_det = self._oakd_pipeline.create(dai.node.XLinkOut)
+        xout_det.setStreamName(self.OAK_DET_STREAM_NAME)
+
+        cam_rgb.preview.link(yolo_det.input)
+        yolo_det.out.link(xout_det.input)
+        self._oakd_has_detection_network = True
+
     def _find_targets_oak(self) -> List[TargetDetection]:
         """
         OAK-D target detection path from find_targets method.
         """
-        # Create empty list to store TargetDetection objects
+        if self.det_queue is None:
+            logging.warning("OAK-D detection queue is not initialized")
+            return []
+
+        detections = self.det_queue.tryGet()
+        if detections is None:
+            return []
+
+        frame_width, frame_height = self.OAK_FRAME_SIZE
+        if self._oakd_current_frame is not None:
+            current_frame = self._oakd_current_frame.getCvFrame()
+            frame_height, frame_width = current_frame.shape[:2]
+
         targets = []
+        for detection in detections.detections:
+            if detection.label < 0 or detection.label >= len(self.oak_label_map):
+                logging.warning(
+                    "Skipping OAK-D detection with out-of-range label %s", detection.label
+                )
+                continue
 
-        # When det_queue method is defined, get all ImgDetection messages
-        detections = self.det_queue.get()
+            xmin = max(0, min(int(detection.xmin * frame_width), frame_width - 1))
+            ymin = max(0, min(int(detection.ymin * frame_height), frame_height - 1))
+            xmax = max(0, min(int(detection.xmax * frame_width), frame_width - 1))
+            ymax = max(0, min(int(detection.ymax * frame_height), frame_height - 1))
 
-        # Iterate through the ImgDetections messages
-        for detection in detections:
-            # Find centers of targets through average of max and min values multipled
-            # by the default frame dimensions
-            center_x = (detection.xmax + detection.xmin) / 2 * 640
-            center_y = (detection.ymax + detection.ymin) / 2 * 400
+            if xmax <= xmin or ymax <= ymin:
+                continue
 
-            # Get corresponding colour value from Colours enum
-            colour = list(Colours)[detection.label].value
-
-            # Find area of the target
-            area = ((detection.ymax - detection.ymin) * h) * (
-                (detection.xmax - detection.xmin) * w
+            contour = np.array(
+                [[[xmin, ymin]], [[xmax, ymin]], [[xmax, ymax]], [[xmin, ymax]]],
+                dtype=np.int32,
             )
+            colour = self.oak_label_map[detection.label].value
+            center_x = (xmin + xmax) / 2
+            center_y = (ymin + ymax) / 2
+            area = float((xmax - xmin) * (ymax - ymin))
 
-            # Add detected iteration to targets list
             targets.append(
                 TargetDetection(
                     colour,
                     center_x,
                     center_y,
-                    1,
-                    1,
+                    1.0,
+                    1.0,
                     area,
-                    None,
+                    contour,
                 )
             )
 
