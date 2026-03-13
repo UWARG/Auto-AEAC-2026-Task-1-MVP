@@ -54,12 +54,13 @@ class ReceiverApp:
             root, text="Capture image", command=self.on_capture_clicked
         )
         self.button.pack(pady=8)
-
-        self.image_label = tk.Label(root)
+        frame=tk.Frame(root)
+        frame.pack(pady=8)
+        self.image_label = tk.Label(frame)
         self.image_label.pack(padx=8, pady=8,side=tk.LEFT)
 
-        self.ardu_image_label=tk.Label(root)
-        self.ardu_image_label.pack(padx=3,pady=8,side=tk.RIGHT)
+        self.ardu_image_label=tk.Label(frame)
+        self.ardu_image_label.pack(padx=8,pady=8,side=tk.RIGHT)
 
         self.range_label = tk.Label(root, text="Downwards: N/A    Depth(center): N/A")
         self.range_label.pack(pady=(0, 2))
