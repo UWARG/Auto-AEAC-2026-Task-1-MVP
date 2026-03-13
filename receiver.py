@@ -35,6 +35,10 @@ SOCKET_TIMEOUT = 10.0  # seconds
 CAMERA_HFOV_RAD = math.radians(80)
 CAMERA_VFOV_RAD = math.radians(55)
 
+ARDU_CAMERA_VFOV_RAD=math.radians(55)
+ARDU_CAMERA_HFOV_RAD=math.radians(80)
+
+
 # Fisheye correction (only near the edges). Correction = 1 + this * (angle / edge_angle)^2.
 # 0.0 = no correction. Use e.g. 0.1–0.3 if the lens compresses angles toward the edges.
 FISHEYE_EDGE_FACTOR = 0.0
@@ -52,7 +56,10 @@ class ReceiverApp:
         self.button.pack(pady=8)
 
         self.image_label = tk.Label(root)
-        self.image_label.pack(padx=8, pady=8)
+        self.image_label.pack(padx=8, pady=8,side=tk.LEFT)
+
+        self.ardu_image_label=tk.Label(root)
+        self.ardu_image_label.pack(padx=3,pady=8,side=tk.RIGHT)
 
         self.range_label = tk.Label(root, text="Downwards: N/A    Depth(center): N/A")
         self.range_label.pack(pady=(0, 2))
@@ -141,6 +148,7 @@ class ReceiverApp:
 
         # Keep a reference to the last PhotoImage to prevent garbage collection
         self._current_photo: Optional[ImageTk.PhotoImage] = None
+        self._current_ardu_photo: Optional[ImageTk.PhotoImage] = None
         # Base display image (with center dot only) for redrawing with crosshairs
         self._base_display_image: Optional[Image.Image] = None
         self._base_depth_map: Optional[np.ndarray] = None
@@ -159,6 +167,8 @@ class ReceiverApp:
 
         # Protect against multiple concurrent capture threads
         self._capture_lock = threading.Lock()
+
+        self.target_on_ground=False
 
     def on_capture_clicked(self) -> None:
         if not self._capture_lock.acquire(blocking=False):
@@ -205,15 +215,21 @@ class ReceiverApp:
 
     def _redraw_image_with_crosshairs(self) -> None:
         """Redraw the image from base, adding target (green) and reference (blue) crosshairs."""
-        if self._base_display_image is None:
+        if self._base_display_image is None or self._base_display_image_arducam is None:
             return
         img = self._base_display_image.copy()
+        img2=self._base_display_image_arducam.copy()
         draw = ImageDraw.Draw(img)
+        draw2=ImageDraw.Draw(img2)
         s = CROSSHAIR_SIZE
-        if self._target_xy is not None:
+        if self._target_xy is not None and not self.target_on_ground:
             tx, ty = self._target_xy
             draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
             draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+        elif self._target_xy is not None and self.target_on_ground:
+            tx,ty=self._target_xy
+            draw2.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+            draw2.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
         if self._ref_xy is not None:
             rx, ry = self._ref_xy
             draw.line(
@@ -223,7 +239,9 @@ class ReceiverApp:
                 (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
             )
         self._current_photo = ImageTk.PhotoImage(image=img)
+        self._current_ardu_photo=ImageTk.PhotoImage(image=img2)
         self.image_label.config(image=self._current_photo)
+        self.ardu_image_label.config(image=self._current_ardu_photo)
 
     def _on_mode_changed(self) -> None:
         """Update action button text when Aided / Full manual changes."""
@@ -237,8 +255,13 @@ class ReceiverApp:
         self._target_xy = None
         self._ref_xy = None
         self._click_mode = None
+        self.target_on_ground=False
         try:
             self.image_label.unbind("<Button-1>")
+        except tk.TclError:
+            pass
+        try:
+            self.ardu_image_label.unbind("<Button-1>")
         except tk.TclError:
             pass
         self._gen_prompt_label.config(text="", fg="black")
@@ -263,7 +286,9 @@ class ReceiverApp:
                 )
                 return
             self._write_output(colour, ref_desc)
+            self.target_on_ground=False
             return
+        self.target_on_ground=False
         self._click_mode = SELECT_TARGET
         self._target_xy = None
         self._ref_xy = None
@@ -272,6 +297,7 @@ class ReceiverApp:
         )
         self._redraw_image_with_crosshairs()
         self.image_label.bind("<Button-1>", self._on_image_click)
+        self.ardu_image_label.bind("<Button-1>",self._on_image_click)
 
     def _start_full_manual_flow(self) -> None:
         """Start two-point selection for full manual; distances drawn on image."""
@@ -345,6 +371,46 @@ class ReceiverApp:
         delta_h = target_depth * math.tan(angle_v)
         return d_down - delta_h
 
+
+    def _compute_cross_camera_offset(self) -> tuple[float,float,float]|None:
+        if not self.target_on_ground:
+            return None
+        tx, ty = self._target_xy
+        rx, ry = self._ref_xy
+        ref_depth=self._sample_depth_m(rx,ry)
+        downward_range=self._last_downwards
+        if ref_depth is None or downward_range is None:
+            return None
+        half_hfov=CAMERA_HFOV_RAD/2
+        half_vfov=CAMERA_VFOV_RAD/2
+        W=self._base_display_image.width
+        H=self._base_display_image.height
+        a_horizontal=((rx-W/2)/(W/2))*half_hfov
+        a_vertical=((ry-H/2)/(H/2))*half_vfov
+        ref_x=ref_depth
+        ref_y=ref_depth*math.tan(a_horizontal)
+        ref_z=ref_depth*math.tan(a_vertical)
+        #for arducam ground target
+        W=self._base_display_image_arducam.width
+        H=self._base_display_image_arducam.height
+        half_hfov=ARDU_CAMERA_HFOV_RAD/2
+        half_vfov=ARDU_CAMERA_VFOV_RAD/2
+        a_horizontal=((tx-W/2)/(W/2))*half_hfov
+        a_vertical=((H/2-ty)/(H/2))*half_vfov #flip h/2 and ty signs for oakd to be facing in positive x dir
+        target_x=downward_range*math.tan(a_vertical) 
+        target_y=downward_range*math.tan(a_horizontal)
+        target_z=downward_range
+        #positive coordinates:
+        #oak-d image right
+        #down
+        #arducam up
+        return (target_x-ref_x, #should always be negative
+                target_y-ref_y,
+                target_z-ref_z)
+
+
+        
+        
     def _compute_lateral_offset_m(self) -> Optional[float]:
         """
         Horizontal distance (m) of the target from the reference, using each point's
@@ -463,10 +529,21 @@ class ReceiverApp:
             lateral_str = f"{abs(lateral):.2f} m to the {direction}"
         else:
             lateral_str = f"to the {direction}"
-        output = (
-            f"The target is {colour}, and is located {downwards_str} off the ground and {lateral_str} "
-            f"of the {ref_desc}."
-        )
+        if not self.target_on_ground:
+            output = (
+                f"The target is {colour}, and is located {downwards_str} off the ground and {lateral_str} "
+                f"of the {ref_desc}."
+            )
+        else:
+            result=self._compute_cross_camera_offset()
+            if result is None:
+                output=("error generating description")
+            else:
+                x,y,z=result
+                output=(
+                    f"The target is {colour}, and is located {x:.2f} meters forward, {z:.2f} meters down"
+                    f" and {y:.2f} meters right from the reference"
+                ) 
         self._output_text.config(state=tk.NORMAL)
         self._output_text.delete("1.0", tk.END)
         self._output_text.insert("1.0", output)
@@ -476,10 +553,18 @@ class ReceiverApp:
         if self._click_mode is None:
             return
         if self._click_mode == SELECT_TARGET:
+            try:
+                self.ardu_image_label.unbind("<Button-1>")
+            except:
+                pass
+            if event.widget==self.ardu_image_label:
+                self.target_on_ground=True
+            else:
+                self.target_on_ground=False
             self._target_xy = (event.x, event.y)
             self._redraw_image_with_crosshairs()
             self._click_mode = SELECT_REFERENCE
-            if self._mode_var.get() == "full_manual":
+            if self._mode_var.get() == "full_manual" and not self.target_on_ground:
                 self._gen_prompt_label.config(
                     text="Select second point", fg=REFERENCE_CROSSHAIR_COLOUR
                 )
@@ -492,7 +577,7 @@ class ReceiverApp:
             self._ref_xy = (event.x, event.y)
             self.image_label.unbind("<Button-1>")
             self._click_mode = None
-            if self._mode_var.get() == "full_manual":
+            if self._mode_var.get() == "full_manual" and not self.target_on_ground:
                 self._draw_manual_measurements()
                 self._gen_prompt_label.config(text="", fg="black")
             else:
@@ -548,9 +633,11 @@ class ReceiverApp:
             display_image = display_image.rotate(
                 -roll_deg, expand=True, resample=Image.BICUBIC
             )
-            display_image2=display_image.rotate(
-                -roll_deg, expand=True, resample=Image.BICUBIC
+            """ Do we need rotation matrix adjustment for YAW?
+            display_image2=display_image2.rotate(
+                -yaw_deg, expand=True, resample=Image.BICUBIC
             )
+            """
             rotated_depth_map = self._rotate_depth_map(rotated_depth_map, -roll_deg)
 
         # Draw red dot in center of (possibly rotated) image
@@ -560,23 +647,23 @@ class ReceiverApp:
         cx2,cy2=display_image2.width//2,display_image2.height//2
         r = 2  # radius in pixels
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="red", outline="red")
-        draw.ellipse([cx-r,cy-r,cx+r,cy+r])
+        draw2.ellipse([cx2-r,cy2-r,cx2+r,cy2+r], fill="red", outline="red")
 
 
         self._base_display_image = display_image.copy()
         self._base_depth_map = rotated_depth_map
         self._base_display_image_arducam=display_image2.copy()
         # Update image display
-
-
-        #TO IMPLEMENT GUI ARDUCAM!
         photo = ImageTk.PhotoImage(image=display_image)
+        ardu_photo = ImageTk.PhotoImage(image=display_image2)
+        self._current_ardu_photo=ardu_photo
         self._current_photo = photo
         self.image_label.config(image=photo)
+        self.ardu_image_label.config(image=ardu_photo)
 
     def request_image(
         self,
-    ) -> Tuple[float, float, float, float, Image.Image, np.ndarray]:
+    ) -> Tuple[float, float, float, float, Image.Image, Image.Image,np.ndarray]:
         """
         Connects to the transmitter, sends a capture command, and receives:
         - downward range (float32), center depth (float32), pitch (float32 rad), roll (float32 rad)
@@ -592,10 +679,10 @@ class ReceiverApp:
             # Send 1-byte capture command
             sock.sendall(b"C")
 
-            header = self._recv_exact(sock, 32)
-            if len(header) != 32:
+            header = self._recv_exact(sock, 40)
+            if len(header) != 40:
                 raise RuntimeError(
-                    f"Incomplete header received (expected 32 bytes, got {len(header)})"
+                    f"Incomplete header received (expected 40 bytes, got {len(header)})"
                 )
 
             downwards_range, center_depth, pitch, roll, image_length, depth_length, ardu_image_length = (

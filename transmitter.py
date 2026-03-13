@@ -40,6 +40,7 @@ MAVLINK_TIMEOUT = 1.0
 
 # Pitch tolerance for 'level' in radians (~0.5 degrees)
 PITCH_LEVEL_TOLERANCE_RAD = math.radians(0.5)
+ROLL_LEVEL_TOLERANCE_RAD=math.radians(0.5)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -339,13 +340,14 @@ class Arducam:
     
     def release(self):
         self._stop_event.set()
-        self.cap.release()
         if self.thread.is_alive():
             self.thread.join()
+        self.cap.release()
+
     
     def capture_payloads(self):
         with self.lock:
-            if frame is None:
+            if self.last_frame is None:
                 return b""
             frame=self.last_frame.copy()
         result,jpeg=cv2.imencode(".jpg",frame,[int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
@@ -360,7 +362,9 @@ def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state
             while True:
                 downward_range, pitch, roll = telemetry_state.get()
                 if not math.isnan(pitch) and abs(pitch) <= PITCH_LEVEL_TOLERANCE_RAD:
-                    break
+                    #Wait for roll to be within tolerance of level as well
+                    if not math.isnan(roll) and abs(roll)<= ROLL_LEVEL_TOLERANCE_RAD:
+                        break
                 # Update at ~50 Hz while waiting for level
                 time.sleep(0.02)
             jpeg_bytes_ardu=camera2.capture_payloads()
