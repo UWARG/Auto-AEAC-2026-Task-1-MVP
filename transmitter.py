@@ -229,6 +229,8 @@ class OakCamera:
         left.setFps(20)
         right.setFps(20)
 
+        rgb.initialControl.setManualExposure(500, 50)
+
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DENSITY)
         stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
         stereo.setOutputSize(self.width, self.height)
