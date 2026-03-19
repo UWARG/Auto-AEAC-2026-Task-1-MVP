@@ -1,0 +1,5 @@
+depthai
+numpy
+opencv-python
+Pillow
+pymavlink
