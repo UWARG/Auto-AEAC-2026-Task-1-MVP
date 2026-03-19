@@ -3,3 +3,5 @@ numpy
 opencv-python
 Pillow
 pymavlink
+Flask
+Flask-Cors
