@@ -11,6 +11,11 @@ import depthai as dai
 import numpy as np
 from pymavlink import mavutil
 
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    Picamera2 = None
+
 # =========================
 # Configuration
 # =========================
@@ -28,6 +33,7 @@ DEPTH_PNG_COMPRESSION = 3
 #ArduCam
 ARDU_WIDTH=640
 ARDU_HEIGHT=360
+ARDU_CAMERA_INDEX = 0
 
 # Flight Controller Connection Settings
 # For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
@@ -319,32 +325,83 @@ class OakCamera:
 
 
 class Arducam:
-    def __init__(self,height,width):
-        self.height=height
-        self.width=width
-        self.lock=threading.Lock()
-        self.last_frame=None
+    def __init__(self, height: int, width: int, camera_index: int = ARDU_CAMERA_INDEX):
+        self.height = height
+        self.width = width
+        self.camera_index = camera_index
+        self.lock = threading.Lock()
+        self.last_frame: Optional[np.ndarray] = None
         self._stop_event = threading.Event()
-        self.cap=cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,height)
-        self.thread=threading.Thread(target=self._capture_loop,daemon=True)
+        self._picam: Optional[Any] = None
+        self._started = False
+
+        if Picamera2 is None:
+            logging.warning(
+                "Picamera2 is not installed; CSI camera capture disabled."
+            )
+            return
+
+        try:
+            self._picam = Picamera2(camera_num=self.camera_index)
+            config = self._picam.create_preview_configuration(
+                main={"size": (width, height), "format": "RGB888"}
+            )
+            self._picam.configure(config)
+            self._picam.start()
+            self._started = True
+            logging.info(
+                "Started CSI camera %s at %sx%s",
+                self.camera_index,
+                self.width,
+                self.height,
+            )
+        except Exception:
+            logging.exception(
+                "Failed to initialize CSI camera %s; secondary capture disabled",
+                self.camera_index,
+            )
+            if self._picam is not None:
+                try:
+                    self._picam.close()
+                except Exception:
+                    pass
+                self._picam = None
+            return
+
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
 
     def _capture_loop(self):
         while not self._stop_event.is_set():
-            ret,frame=self.cap.read()
-            if not ret:
+            if self._picam is None:
+                time.sleep(0.1)
+                continue
+
+            try:
+                frame = self._picam.capture_array("main")
+            except Exception:
+                logging.exception("CSI camera frame capture failed")
                 time.sleep(0.01)
-            else:
-                with self.lock:
-                    self.last_frame=frame
+                continue
+
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            with self.lock:
+                self.last_frame = frame_bgr
     
     def release(self):
         self._stop_event.set()
-        if self.thread.is_alive():
-            self.thread.join()
-        self.cap.release()
+        if hasattr(self, "thread") and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        if self._picam is not None and self._started:
+            try:
+                self._picam.stop()
+            except Exception:
+                pass
+        if self._picam is not None:
+            try:
+                self._picam.close()
+            except Exception:
+                pass
 
     
     def capture_payloads(self):
@@ -408,6 +465,7 @@ def run_server():
         pass
     finally:
         camera.release()
+        camera_down.release()
         mav_thread.stop()
         server_sock.close()
 

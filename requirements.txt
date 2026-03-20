@@ -2,4 +2,5 @@ depthai
 numpy
 opencv-python
 Pillow
+picamera2
 pymavlink
