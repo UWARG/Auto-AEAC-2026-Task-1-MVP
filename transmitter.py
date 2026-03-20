@@ -29,11 +29,13 @@ FRAME_WIDTH = 640
 FRAME_HEIGHT = 360
 JPEG_QUALITY = 90
 DEPTH_PNG_COMPRESSION = 3
+OAK_FRAME_WAIT_TIMEOUT_S = 2.0
 
 #ArduCam
 ARDU_WIDTH=640
 ARDU_HEIGHT=360
 ARDU_CAMERA_INDEX = 0
+ARDU_FRAME_WAIT_TIMEOUT_S = 2.0
 
 # Flight Controller Connection Settings
 # For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
@@ -216,6 +218,9 @@ class OakCamera:
         self._latest_rgb: Optional[np.ndarray] = None
         self._latest_depth: Optional[np.ndarray] = None
         self._stop_event = threading.Event()
+        self._frame_ready = threading.Event()
+        self._logged_first_rgb = False
+        self._logged_first_depth = False
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
@@ -277,20 +282,32 @@ class OakCamera:
                 with self._lock:
                     rgb_img = cast(Any, rgb_frame).getCvFrame()
                     self._latest_rgb = rgb_img
+                if not self._logged_first_rgb:
+                    logging.info(
+                        "Received first OAK-D RGB frame (%sx%s)",
+                        rgb_img.shape[1],
+                        rgb_img.shape[0],
+                    )
+                    self._logged_first_rgb = True
             if depth_frame is not None:
                 with self._lock:
                     depth_img = cast(Any, depth_frame).getFrame().copy()
                     self._latest_depth = depth_img
+                if not self._logged_first_depth:
+                    logging.info(
+                        "Received first OAK-D depth frame (%sx%s)",
+                        depth_img.shape[1],
+                        depth_img.shape[0],
+                    )
+                    self._logged_first_depth = True
+            if self._latest_rgb is not None and self._latest_depth is not None:
+                self._frame_ready.set()
             if rgb_frame is None and depth_frame is None:
                 time.sleep(0.01)
 
-    def capture_payloads(self) -> Tuple[bytes, bytes, float]:
-        with self._lock:
-            if self._latest_rgb is None or self._latest_depth is None:
-                return b"", b"", float("nan")
-            rgb_frame = self._latest_rgb
-            depth_frame = self._latest_depth
-
+    def _encode_payloads(
+        self, rgb_frame: np.ndarray, depth_frame: np.ndarray
+    ) -> Tuple[bytes, bytes]:
         ok_jpeg, jpeg_buf = cv2.imencode(
             ".jpg",
             rgb_frame,
@@ -302,6 +319,40 @@ class OakCamera:
             [int(cv2.IMWRITE_PNG_COMPRESSION), DEPTH_PNG_COMPRESSION],
         )
         if not ok_jpeg or not ok_png:
+            return b"", b""
+        return jpeg_buf.tobytes(), depth_buf.tobytes()
+
+    def _build_fallback_frames(self) -> Tuple[np.ndarray, np.ndarray]:
+        logging.warning(
+            "Using blank fallback frames for OAK-D because no valid frame pair was available"
+        )
+        rgb_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        depth_frame = np.zeros((self.height, self.width), dtype=np.uint16)
+        return rgb_frame, depth_frame
+
+    def capture_payloads(self) -> Tuple[bytes, bytes, float]:
+        if not self._frame_ready.is_set():
+            logging.info(
+                "Waiting up to %.1f s for first OAK-D RGB/depth frame pair before capture",
+                OAK_FRAME_WAIT_TIMEOUT_S,
+            )
+            self._frame_ready.wait(timeout=OAK_FRAME_WAIT_TIMEOUT_S)
+
+        with self._lock:
+            rgb_frame = None if self._latest_rgb is None else self._latest_rgb.copy()
+            depth_frame = (
+                None if self._latest_depth is None else self._latest_depth.copy()
+            )
+
+        if rgb_frame is None or depth_frame is None:
+            rgb_frame, depth_frame = self._build_fallback_frames()
+
+        jpeg_bytes, depth_bytes = self._encode_payloads(rgb_frame, depth_frame)
+        if not jpeg_bytes or not depth_bytes:
+            logging.error("Failed to encode OAK-D payloads; retrying with fallback frames")
+            jpeg_bytes, depth_bytes = self._encode_payloads(*self._build_fallback_frames())
+        if not jpeg_bytes or not depth_bytes:
+            logging.error("OAK-D fallback encoding failed; returning empty payloads")
             return b"", b"", float("nan")
 
         center_y = depth_frame.shape[0] // 2
@@ -314,7 +365,7 @@ class OakCamera:
         center_depth_m = (
             float(np.median(valid) / 1000.0) if valid.size else float("nan")
         )
-        return jpeg_buf.tobytes(), depth_buf.tobytes(), center_depth_m
+        return jpeg_bytes, depth_bytes, center_depth_m
 
     def release(self):
         self._stop_event.set()
@@ -335,6 +386,7 @@ class Arducam:
         self._picam: Optional[Any] = None
         self._started = False
         self._logged_first_frame = False
+        self._frame_ready = threading.Event()
 
         if Picamera2 is None:
             logging.warning(
@@ -403,6 +455,7 @@ class Arducam:
                     frame_bgr.shape[0],
                 )
                 self._logged_first_frame = True
+            self._frame_ready.set()
     
     def release(self):
         self._stop_event.set()
@@ -420,26 +473,53 @@ class Arducam:
                 pass
         logging.info("Released CSI camera %s", self.camera_index)
 
-    
-    def capture_payloads(self):
-        with self.lock:
-            if self.last_frame is None:
-                logging.warning("CSI capture requested before first frame was available")
-                return b""
-            frame = self.last_frame.copy()
+    def _encode_jpeg(self, frame: np.ndarray) -> bytes:
         result, jpeg = cv2.imencode(
             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
         )
         if not result:
             logging.error("Failed to JPEG-encode CSI frame")
             return b""
-        logging.info("Prepared CSI JPEG payload (%s bytes)", len(jpeg))
         return jpeg.tobytes()
+
+    def _build_fallback_frame(self) -> np.ndarray:
+        logging.warning(
+            "Using blank fallback image for CSI camera %s because no valid frame was available",
+            self.camera_index,
+        )
+        return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+    def capture_payloads(self):
+        if not self._frame_ready.is_set():
+            logging.info(
+                "Waiting up to %.1f s for first CSI frame before capture",
+                ARDU_FRAME_WAIT_TIMEOUT_S,
+            )
+            self._frame_ready.wait(timeout=ARDU_FRAME_WAIT_TIMEOUT_S)
+
+        with self.lock:
+            frame = None if self.last_frame is None else self.last_frame.copy()
+
+        if frame is None:
+            frame = self._build_fallback_frame()
+
+        jpeg_bytes = self._encode_jpeg(frame)
+        if not jpeg_bytes:
+            jpeg_bytes = self._encode_jpeg(self._build_fallback_frame())
+        if not jpeg_bytes:
+            logging.error("CSI fallback JPEG encoding failed; returning empty payload")
+            return b""
+        logging.info("Prepared CSI JPEG payload (%s bytes)", len(jpeg_bytes))
+        return jpeg_bytes
 
 def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state: TelemetryState):
     try:
         logging.info("Client connected from %s", addr)
-        request_code = conn.recv(1)
+        try:
+            request_code = conn.recv(1)
+        except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+            logging.warning("Client %s disconnected before sending request: %s", addr, exc)
+            return
         logging.info("Received client request code %r", request_code)
         if request_code == b"C":
             logging.info("Capture request acknowledged; waiting for vehicle to level")
@@ -487,12 +567,25 @@ def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state
                 len(depth_bytes),
                 len(jpeg_bytes_ardu)
             )
-            conn.sendall(header + jpeg_bytes + depth_bytes + jpeg_bytes_ardu)
+            try:
+                conn.sendall(header + jpeg_bytes + depth_bytes + jpeg_bytes_ardu)
+            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                logging.warning(
+                    "Client %s disconnected while sending capture payload: %s",
+                    addr,
+                    exc,
+                )
+                return
             logging.info("Capture payload sent to %s", addr)
         else:
             logging.warning("Ignoring unknown client request code %r from %s", request_code, addr)
+    except Exception:
+        logging.exception("Unhandled error while serving client %s", addr)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except OSError:
+            pass
         logging.info("Closed client connection from %s", addr)
 
         
