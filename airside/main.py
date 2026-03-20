@@ -1,754 +1,414 @@
-import io
+import logging
 import math
 import socket
 import struct
 import threading
-import tkinter as tk
-from tkinter import messagebox
-from typing import Optional, Tuple
+import time
+from typing import Any, Optional, Tuple, cast
 
 import cv2
+import depthai as dai
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageTk
-
-# Click mode for "Generate output" flow
-SELECT_TARGET = "target"
-SELECT_REFERENCE = "reference"
-
-# Crosshair colors (match prompt text color)
-TARGET_CROSSHAIR_COLOUR = "lime"  # green, for "Select target center"
-REFERENCE_CROSSHAIR_COLOUR = "deepskyblue"  # blue, for "Select reference point"
-CROSSHAIR_SIZE = 8  # half-length of each crosshair arm in pixels
-
+from pymavlink import mavutil
 
 # =========================
 # Configuration
 # =========================
 
-# IP and port of the transmitter (Raspberry Pi on the drone)
-TRANSMITTER_HOST = "192.168.232.15"
-TRANSMITTER_PORT = 5000
+# Network settings for the Transmission Server (this script)
+HOST = "0.0.0.0"
+PORT = 5000
 
-SOCKET_TIMEOUT = 10.0  # seconds
+# OAK-D Pro output settings
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 360
+JPEG_QUALITY = 90
+DEPTH_PNG_COMPRESSION = 3
 
-# Camera FOV (radians) used to project clicked pixels into metric offsets
-CAMERA_HFOV_RAD = math.radians(80)
-CAMERA_VFOV_RAD = math.radians(55)
+#ArduCam
+ARDU_WIDTH=640
+ARDU_HEIGHT=360
 
-ARDU_CAMERA_VFOV_RAD=math.radians(55)
-ARDU_CAMERA_HFOV_RAD=math.radians(80)
+# Flight Controller Connection Settings
+# For serial (e.g. Raspberry Pi GPIO): "/dev/ttyAMA0" or "/dev/serial0"
+# For UDP (e.g. SITL or network): "udpout:IP_ADDRESS:PORT"
+FC_ADDR = "/dev/ttyAMA0"
+FC_BAUD = 57600
 
+# How long to wait for MAVLink messages before giving up (seconds)
+MAVLINK_TIMEOUT = 1.0
 
-# Fisheye correction (only near the edges). Correction = 1 + this * (angle / edge_angle)^2.
-# 0.0 = no correction. Use e.g. 0.1–0.3 if the lens compresses angles toward the edges.
-FISHEYE_EDGE_FACTOR = 0.0
+# Pitch tolerance for 'level' in radians (~0.5 degrees)
+PITCH_LEVEL_TOLERANCE_RAD = math.radians(0.5)
+ROLL_LEVEL_TOLERANCE_RAD=math.radians(0.5)
 
-
-class ReceiverApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Drone Image Receiver")
-
-        # GUI elements
-        self.button = tk.Button(
-            root, text="Capture image", command=self.on_capture_clicked
-        )
-        self.button.pack(pady=8)
-        frame=tk.Frame(root)
-        frame.pack(pady=8)
-        self.image_label = tk.Label(frame)
-        self.image_label.pack(padx=8, pady=8,side=tk.LEFT)
-
-        self.ardu_image_label=tk.Label(frame)
-        self.ardu_image_label.pack(padx=8,pady=8,side=tk.RIGHT)
-
-        self.range_label = tk.Label(root, text="Downwards: N/A    Depth(center): N/A")
-        self.range_label.pack(pady=(0, 2))
-        self.pitch_label = tk.Label(root, text="Pitch: N/A")
-        self.pitch_label.pack(pady=(0, 2))
-        self.roll_label = tk.Label(root, text="Roll: N/A")
-        self.roll_label.pack(pady=(0, 8))
-        self.capture_status_label = tk.Label(root, text="", fg="orange red")
-        self.capture_status_label.pack(pady=(0, 4))
-
-        # Generate output section
-        gen_frame = tk.Frame(root)
-        gen_frame.pack(pady=8, padx=8, fill=tk.X)
-
-        tk.Label(gen_frame, text="Mode:").grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 4)
-        )
-        self._mode_var = tk.StringVar(value="aided")
-        mode_frame = tk.Frame(gen_frame)
-        mode_frame.grid(row=0, column=1, sticky=tk.W, pady=2)
-        tk.Radiobutton(
-            mode_frame,
-            text="Aided",
-            variable=self._mode_var,
-            value="aided",
-            command=self._on_mode_changed,
-        ).pack(side=tk.LEFT, padx=(0, 12))
-        tk.Radiobutton(
-            mode_frame,
-            text="Full manual",
-            variable=self._mode_var,
-            value="full_manual",
-            command=self._on_mode_changed,
-        ).pack(side=tk.LEFT)
-
-        tk.Label(gen_frame, text="Target colour:").grid(
-            row=1, column=0, sticky=tk.W, padx=(0, 4)
-        )
-        self._colour_entry = tk.Entry(gen_frame, width=20)
-        self._colour_entry.grid(row=1, column=1, sticky=tk.W, pady=2)
-
-        tk.Label(gen_frame, text="Reference description:").grid(
-            row=2, column=0, sticky=tk.W, padx=(0, 4)
-        )
-        self._ref_desc_entry = tk.Entry(gen_frame, width=30)
-        self._ref_desc_entry.grid(row=2, column=1, sticky=tk.W, pady=2)
-
-        tk.Label(gen_frame, text="Target:").grid(
-            row=3, column=0, sticky=tk.W, padx=(0, 4)
-        )
-        self._target_direction = tk.StringVar(value="forwards")
-        target_frame = tk.Frame(gen_frame)
-        target_frame.grid(row=3, column=1, sticky=tk.W, pady=2)
-        tk.Radiobutton(
-            target_frame,
-            text="Forwards",
-            variable=self._target_direction,
-            value="forwards",
-        ).pack(side=tk.LEFT, padx=(0, 12))
-        self._downwards_radio = tk.Radiobutton(
-            target_frame,
-            text="Downwards",
-            variable=self._target_direction,
-            value="downwards",
-            state=tk.DISABLED,
-        )
-        self._downwards_radio.pack(side=tk.LEFT)
-
-        self._gen_prompt_label = tk.Label(gen_frame, text="")
-        self._gen_prompt_label.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=4)
-
-        btn_frame = tk.Frame(gen_frame)
-        btn_frame.grid(row=5, column=0, columnspan=2, pady=4)
-        self._action_btn = tk.Button(
-            btn_frame, text="Generate output", command=self._on_action_clicked
-        )
-        self._action_btn.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(btn_frame, text="Clear", command=self._on_clear_clicked).pack(
-            side=tk.LEFT
-        )
-
-        self._output_text = tk.Text(
-            root, height=4, width=60, wrap=tk.WORD, state=tk.DISABLED
-        )
-        self._output_text.pack(pady=8, padx=8, fill=tk.X)
-
-        # Keep a reference to the last PhotoImage to prevent garbage collection
-        self._current_photo: Optional[ImageTk.PhotoImage] = None
-        self._current_ardu_photo: Optional[ImageTk.PhotoImage] = None
-        # Base display image (with center dot only) for redrawing with crosshairs
-        self._base_display_image: Optional[Image.Image] = None
-        self._base_depth_map: Optional[np.ndarray] = None
-        self._base_display_image_arducam:Optional[Image.Image] = None
-
-        # Last telemetry from capture (for generate output)
-        self._last_downwards: Optional[float] = None
-        self._last_center_depth: Optional[float] = None
-        self._last_pitch: Optional[float] = None
-        self._last_roll: Optional[float] = None
-
-        # Generate-output click state: None | SELECT_TARGET | SELECT_REFERENCE
-        self._click_mode: Optional[str] = None
-        self._target_xy: Optional[Tuple[int, int]] = None
-        self._ref_xy: Optional[Tuple[int, int]] = None
-
-        # Protect against multiple concurrent capture threads
-        self._capture_lock = threading.Lock()
-
-        self.target_on_ground=False
-
-    def on_capture_clicked(self) -> None:
-        if not self._capture_lock.acquire(blocking=False):
-            # A capture is already in progress
-            return
-
-        self.button.config(state=tk.DISABLED)
-        self.capture_status_label.config(text="Waiting for level...")
-
-        thread = threading.Thread(target=self._capture_worker, daemon=True)
-        thread.start()
-
-    def _capture_worker(self) -> None:
-        try:
-            downwards_range, center_depth, pitch, roll, image,image2, depth_map = (
-                self.request_image()
-            )
-        except Exception as exc:
-            self.root.after(0, self._handle_capture_error, exc)
-        else:
-            self.root.after(
-                0,
-                self._handle_capture_success,
-                downwards_range,
-                center_depth,
-                pitch,
-                roll,
-                image,
-                image2,
-                depth_map,
-            )
-        finally:
-            self.root.after(0, self._release_capture_lock)
-
-    def _release_capture_lock(self) -> None:
-        self._capture_lock.release()
-        self.button.config(state=tk.NORMAL)
-
-    def _handle_capture_error(self, exc: Exception) -> None:
-        self.capture_status_label.config(text="")
-        messagebox.showerror(
-            "Capture failed", f"Failed to capture image from transmitter:\n{exc}"
-        )
-
-    def _redraw_image_with_crosshairs(self) -> None:
-        """Redraw the image from base, adding target (green) and reference (blue) crosshairs."""
-        if self._base_display_image is None or self._base_display_image_arducam is None:
-            return
-        img = self._base_display_image.copy()
-        img2=self._base_display_image_arducam.copy()
-        draw = ImageDraw.Draw(img)
-        draw2=ImageDraw.Draw(img2)
-        s = CROSSHAIR_SIZE
-        if self._target_xy is not None and not self.target_on_ground:
-            tx, ty = self._target_xy
-            draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-            draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-        elif self._target_xy is not None and self.target_on_ground:
-            tx,ty=self._target_xy
-            draw2.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-            draw2.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-        if self._ref_xy is not None:
-            rx, ry = self._ref_xy
-            draw.line(
-                (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
-            )
-            draw.line(
-                (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
-            )
-        self._current_photo = ImageTk.PhotoImage(image=img)
-        self._current_ardu_photo=ImageTk.PhotoImage(image=img2)
-        self.image_label.config(image=self._current_photo)
-        self.ardu_image_label.config(image=self._current_ardu_photo)
-
-    def _on_mode_changed(self) -> None:
-        """Update action button text when Aided / Full manual changes."""
-        if self._mode_var.get() == "full_manual":
-            self._action_btn.config(text="Select points to measure")
-        else:
-            self._action_btn.config(text="Generate output")
-
-    def _on_clear_clicked(self) -> None:
-        """Clear target and reference so the user can reselect them."""
-        self._target_xy = None
-        self._ref_xy = None
-        self._click_mode = None
-        self.target_on_ground=False
-        try:
-            self.image_label.unbind("<Button-1>")
-        except tk.TclError:
-            pass
-        try:
-            self.ardu_image_label.unbind("<Button-1>")
-        except tk.TclError:
-            pass
-        self._gen_prompt_label.config(text="", fg="black")
-        self._redraw_image_with_crosshairs()
-
-    def _on_action_clicked(self) -> None:
-        """Handle main button: Aided = generate output flow; Full manual = two-point measure."""
-        if self._current_photo is None:
-            messagebox.showinfo("No image", "Capture an image first.")
-            return
-        if self._mode_var.get() == "full_manual":
-            self._start_full_manual_flow()
-            return
-        # Aided mode
-        if self._target_xy is not None and self._ref_xy is not None:
-            colour = (self._colour_entry.get() or "").strip()
-            ref_desc = (self._ref_desc_entry.get() or "").strip()
-            if not colour or not ref_desc:
-                messagebox.showwarning(
-                    "Missing information",
-                    "Please fill both Target colour and Reference description, then press Generate output.",
-                )
-                return
-            self._write_output(colour, ref_desc)
-            self.target_on_ground=False
-            return
-        self.target_on_ground=False
-        self._click_mode = SELECT_TARGET
-        self._target_xy = None
-        self._ref_xy = None
-        self._gen_prompt_label.config(
-            text="Select target center", fg=TARGET_CROSSHAIR_COLOUR
-        )
-        self._redraw_image_with_crosshairs()
-        self.image_label.bind("<Button-1>", self._on_image_click)
-        self.ardu_image_label.bind("<Button-1>",self._on_image_click)
-
-    def _start_full_manual_flow(self) -> None:
-        """Start two-point selection for full manual; distances drawn on image."""
-        self._click_mode = SELECT_TARGET
-        self._target_xy = None
-        self._ref_xy = None
-        self._gen_prompt_label.config(
-            text="Select first point", fg=TARGET_CROSSHAIR_COLOUR
-        )
-        self._redraw_image_with_crosshairs()
-        self.image_label.bind("<Button-1>", self._on_image_click)
-
-    @staticmethod
-    def _rotate_depth_map(depth_map: np.ndarray, angle_deg: float) -> np.ndarray:
-        height, width = depth_map.shape[:2]
-        center = (width / 2.0, height / 2.0)
-        matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
-        cos = abs(matrix[0, 0])
-        sin = abs(matrix[0, 1])
-
-        new_width = int((height * sin) + (width * cos))
-        new_height = int((height * cos) + (width * sin))
-        matrix[0, 2] += (new_width / 2) - center[0]
-        matrix[1, 2] += (new_height / 2) - center[1]
-
-        return cv2.warpAffine(
-            depth_map,
-            matrix,
-            (new_width, new_height),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-
-    def _sample_depth_m(self, x: int, y: int, radius: int = 4) -> Optional[float]:
-        if self._base_depth_map is None:
-            return None
-        height, width = self._base_depth_map.shape[:2]
-        if x < 0 or y < 0 or x >= width or y >= height:
-            return None
-        x0 = max(0, x - radius)
-        x1 = min(width, x + radius + 1)
-        y0 = max(0, y - radius)
-        y1 = min(height, y + radius + 1)
-        patch = self._base_depth_map[y0:y1, x0:x1]
-        valid = patch[patch > 0]
-        if valid.size == 0:
-            return None
-        return float(np.median(valid) / 1000.0)
-
-    def _compute_corrected_up_m(self) -> Optional[float]:
-        """
-        Corrected 'up' distance (m): downward rangefinder minus the vertical offset of the
-        target from the drone, using the target's sampled OAK-D depth and the vertical FOV.
-        Returns None if readings or image are missing/invalid.
-        """
-        if self._base_display_image is None or self._target_xy is None:
-            return None
-        d_down = self._last_downwards
-        tx, ty = self._target_xy
-        target_depth = self._sample_depth_m(tx, ty)
-        if d_down is None or target_depth is None:
-            return None
-        if d_down != d_down or target_depth != target_depth:  # NaN
-            return None
-        H = self._base_display_image.height
-        # Vertical angle from image center (rad): positive when target below center
-        half_vfov = CAMERA_VFOV_RAD / 2
-        angle_v = (ty - H / 2) / (H / 2) * half_vfov
-        angle_v = angle_v * (1.0 + FISHEYE_EDGE_FACTOR * (angle_v / half_vfov) ** 2)
-        delta_h = target_depth * math.tan(angle_v)
-        return d_down - delta_h
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
-    def _compute_cross_camera_offset(self) -> tuple[float,float,float]|None:
-        if not self.target_on_ground:
-            return None
-        tx, ty = self._target_xy
-        rx, ry = self._ref_xy
-        ref_depth=self._sample_depth_m(rx,ry)
-        downward_range=self._last_downwards
-        if ref_depth is None or downward_range is None:
-            return None
-        half_hfov=CAMERA_HFOV_RAD/2
-        half_vfov=CAMERA_VFOV_RAD/2
-        W=self._base_display_image.width
-        H=self._base_display_image.height
-        a_horizontal=((rx-W/2)/(W/2))*half_hfov
-        a_vertical=((ry-H/2)/(H/2))*half_vfov
-        ref_x=ref_depth
-        ref_y=ref_depth*math.tan(a_horizontal)
-        ref_z=ref_depth*math.tan(a_vertical)
-        #for arducam ground target
-        W=self._base_display_image_arducam.width
-        H=self._base_display_image_arducam.height
-        half_hfov=ARDU_CAMERA_HFOV_RAD/2
-        half_vfov=ARDU_CAMERA_VFOV_RAD/2
-        a_horizontal=((tx-W/2)/(W/2))*half_hfov
-        a_vertical=((H/2-ty)/(H/2))*half_vfov #flip h/2 and ty signs for oakd to be facing in positive x dir
-        target_x=downward_range*math.tan(a_vertical) 
-        target_y=downward_range*math.tan(a_horizontal)
-        target_z=downward_range
-        #positive coordinates:
-        #oak-d image right
-        #down
-        #arducam up
-        return (target_x-ref_x, #should always be negative
-                target_y-ref_y,
-                target_z-ref_z)
+class TelemetryState:
+    """Thread-safe storage for downward range and attitude (pitch/roll in rad)."""
 
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._downward_range: Optional[float] = None
+        self._pitch: Optional[float] = None  # radians, from ATTITUDE
+        self._roll: Optional[float] = None  # radians, from ATTITUDE
 
-        
-        
-    def _compute_lateral_offset_m(self) -> Optional[float]:
-        """
-        Horizontal distance (m) of the target from the reference, using each point's
-        sampled OAK-D depth and the horizontal FOV. Positive = target to the right
-        of reference in image.
-        Returns None if cannot compute.
-        """
-        if (
-            self._base_display_image is None
-            or self._target_xy is None
-            or self._ref_xy is None
-        ):
-            return None
-        W = self._base_display_image.width
-        tx, ty = self._target_xy
-        rx, ry = self._ref_xy
-        target_depth = self._sample_depth_m(tx, ty)
-        ref_depth = self._sample_depth_m(rx, ry)
-        if target_depth is None or ref_depth is None:
-            return None
-        half_hfov = CAMERA_HFOV_RAD / 2
-        angle_tx = (tx - W / 2) / (W / 2) * half_hfov
-        angle_rx = (rx - W / 2) / (W / 2) * half_hfov
-        angle_tx = angle_tx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_tx / half_hfov) ** 2)
-        angle_rx = angle_rx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_rx / half_hfov) ** 2)
-        target_x_m = target_depth * math.tan(angle_tx)
-        ref_x_m = ref_depth * math.tan(angle_rx)
-        return target_x_m - ref_x_m
-
-    def _compute_delta_up_sideways_m(
+    def update(
         self,
-    ) -> Tuple[Optional[float], Optional[float]]:
-        """
-        Distance up (vertical) and sideways (horizontal) in metres between the two
-        selected points (point 1 = target_xy, point 2 = ref_xy). Uses FOV and
-        sampled OAK-D depth at each point.
-        Returns (delta_up_m, delta_sideways_m); either can be None if unavailable.
-        """
-        if (
-            self._base_display_image is None
-            or self._target_xy is None
-            or self._ref_xy is None
-        ):
-            return None, None
-        W, H = self._base_display_image.width, self._base_display_image.height
-        x1, y1 = self._target_xy
-        x2, y2 = self._ref_xy
-        depth1 = self._sample_depth_m(x1, y1)
-        depth2 = self._sample_depth_m(x2, y2)
-        if depth1 is None or depth2 is None:
-            return None, None
-        half_vfov = CAMERA_VFOV_RAD / 2
-        half_hfov = CAMERA_HFOV_RAD / 2
-        # Vertical angles (rad)
-        a1 = (y1 - H / 2) / (H / 2) * half_vfov
-        a2 = (y2 - H / 2) / (H / 2) * half_vfov
-        a1 = a1 * (1.0 + FISHEYE_EDGE_FACTOR * (a1 / half_vfov) ** 2)
-        a2 = a2 * (1.0 + FISHEYE_EDGE_FACTOR * (a2 / half_vfov) ** 2)
-        delta_up = (depth2 * math.tan(a2)) - (depth1 * math.tan(a1))
-        # Horizontal angles (rad)
-        b1 = (x1 - W / 2) / (W / 2) * half_hfov
-        b2 = (x2 - W / 2) / (W / 2) * half_hfov
-        b1 = b1 * (1.0 + FISHEYE_EDGE_FACTOR * (b1 / half_hfov) ** 2)
-        b2 = b2 * (1.0 + FISHEYE_EDGE_FACTOR * (b2 / half_hfov) ** 2)
-        delta_sideways = (depth2 * math.tan(b2)) - (depth1 * math.tan(b1))
-        return delta_up, delta_sideways
-
-    def _draw_manual_measurements(self) -> None:
-        """Draw both points and the distance up/sideways between them on the image."""
-        if self._base_display_image is None:
-            return
-        delta_up, delta_sideways = self._compute_delta_up_sideways_m()
-        img = self._base_display_image.copy()
-        draw = ImageDraw.Draw(img)
-        s = CROSSHAIR_SIZE
-        if self._target_xy is not None:
-            tx, ty = self._target_xy
-            draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-            draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
-        if self._ref_xy is not None:
-            rx, ry = self._ref_xy
-            draw.line(
-                (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
-            )
-            draw.line(
-                (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
-            )
-        up_str = f"{delta_up:.2f} m" if delta_up is not None else "N/A"
-        side_str = f"{delta_sideways:.2f} m" if delta_sideways is not None else "N/A"
-        try:
-            font = ImageFont.truetype("arial.ttf", 16)
-        except (OSError, ImportError):
-            font = ImageFont.load_default()
-        draw.text((10, 10), f"Up: {up_str}", fill="white", font=font)
-        draw.text((10, 28), f"Sideways: {side_str}", fill="white", font=font)
-        self._current_photo = ImageTk.PhotoImage(image=img)
-        self.image_label.config(image=self._current_photo)
-
-    def _write_output(self, colour: str, ref_desc: str) -> None:
-        """Build the output sentence and write it to the output text box."""
-        corrected_up = self._compute_corrected_up_m()
-        if corrected_up is not None:
-            downwards_str = f"{corrected_up:.2f} m"
-        elif (
-            self._last_downwards is not None
-            and self._last_downwards == self._last_downwards
-        ):
-            downwards_str = f"{self._last_downwards:.2f} m"
-        else:
-            downwards_str = "N/A"
-        tx, ty = self._target_xy
-        rx, ry = self._ref_xy
-        direction = "left" if tx < rx else "right"
-        lateral = self._compute_lateral_offset_m()
-        if lateral is not None:
-            lateral_str = f"{abs(lateral):.2f} m to the {direction}"
-        else:
-            lateral_str = f"to the {direction}"
-        if not self.target_on_ground:
-            output = (
-                f"The target is {colour}, and is located {downwards_str} off the ground and {lateral_str} "
-                f"of the {ref_desc}."
-            )
-        else:
-            result=self._compute_cross_camera_offset()
-            if result is None:
-                output=("error generating description")
-            else:
-                x,y,z=result
-                output=(
-                    f"The target is {colour}, and is located {x:.2f} meters forward, {z:.2f} meters down"
-                    f" and {y:.2f} meters right from the reference"
-                ) 
-        self._output_text.config(state=tk.NORMAL)
-        self._output_text.delete("1.0", tk.END)
-        self._output_text.insert("1.0", output)
-        self._output_text.config(state=tk.DISABLED)
-
-    def _on_image_click(self, event: tk.Event) -> None:
-        if self._click_mode is None:
-            return
-        if self._click_mode == SELECT_TARGET:
-            try:
-                self.ardu_image_label.unbind("<Button-1>")
-            except:
-                pass
-            if event.widget==self.ardu_image_label:
-                self.target_on_ground=True
-            else:
-                self.target_on_ground=False
-            self._target_xy = (event.x, event.y)
-            self._redraw_image_with_crosshairs()
-            self._click_mode = SELECT_REFERENCE
-            if self._mode_var.get() == "full_manual" and not self.target_on_ground:
-                self._gen_prompt_label.config(
-                    text="Select second point", fg=REFERENCE_CROSSHAIR_COLOUR
-                )
-            else:
-                self._gen_prompt_label.config(
-                    text="Select reference point", fg=REFERENCE_CROSSHAIR_COLOUR
-                )
-            return
-        if self._click_mode == SELECT_REFERENCE:
-            self._ref_xy = (event.x, event.y)
-            self.image_label.unbind("<Button-1>")
-            self._click_mode = None
-            if self._mode_var.get() == "full_manual" and not self.target_on_ground:
-                self._draw_manual_measurements()
-                self._gen_prompt_label.config(text="", fg="black")
-            else:
-                self._redraw_image_with_crosshairs()
-                self._gen_prompt_label.config(
-                    text="Fill the fields above and press Generate output to see the result.",
-                    fg="black",
-                )
-
-    def _handle_capture_success(
-        self,
-        downwards_range: float,
-        center_depth: float,
-        pitch: float,
-        roll: float,
-        image: Image.Image,
-        image2: Image.Image,
-        depth_map: np.ndarray,
+        downward_range: Optional[float] = None,
+        pitch: Optional[float] = None,
+        roll: Optional[float] = None,
     ) -> None:
-        def fmt(v: float) -> str:
-            if v != v:  # NaN check
-                return "N/A"
-            return f"{v:.2f} m"
+        with self._lock:
+            if downward_range is not None:
+                self._downward_range = downward_range
+            if pitch is not None:
+                self._pitch = pitch
+            if roll is not None:
+                self._roll = roll
 
-        self.range_label.config(
-            text=f"Downwards: {fmt(downwards_range)}    Depth(center): {fmt(center_depth)}"
+    def get(self) -> Tuple[float, float, float]:
+        with self._lock:
+            downward_range = (
+                self._downward_range
+                if self._downward_range is not None
+                else float("nan")
+            )
+            p = self._pitch if self._pitch is not None else float("nan")
+            r = self._roll if self._roll is not None else float("nan")
+        return downward_range, p, r
+
+
+class MavlinkReader(threading.Thread):
+    """Background thread to read MAVLink via Serial or UDP."""
+
+    def __init__(self, connection_str: str, state: TelemetryState) -> None:
+        super().__init__(daemon=True)
+        self.connection_str = connection_str
+        self.state = state
+        self._stop_event = threading.Event()
+        self._mav: Optional[Any] = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _request_telemetry_streams(self) -> None:
+        if self._mav is None:
+            return
+        mav = self._mav.mav
+        sys_id = self._mav.target_system
+        comp_id = self._mav.target_component
+
+        # Try modern SET_MESSAGE_INTERVAL method
+        requests = [
+            ("RANGEFINDER", mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER, 100_000),
+            (
+                "DISTANCE_SENSOR",
+                mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR,
+                100_000,
+            ),
+            ("ATTITUDE", mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 20_000),  # 50 Hz
+        ]
+
+        for name, msg_id, interval_us in requests:
+            mav.command_long_send(
+                sys_id,
+                comp_id,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                0,
+                float(msg_id),
+                float(interval_us),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+
+        # Fallback: legacy request stream for older ArduPilot versions
+        # MAV_DATA_STREAM_EXTRA1 includes ATTITUDE
+        mav.request_data_stream_send(
+            sys_id,
+            comp_id,
+            mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+            5,  # 5 Hz fallback
+            1,  # Start
         )
-        self._last_downwards = downwards_range
-        self._last_center_depth = center_depth
-        self._last_pitch = pitch if pitch == pitch else None
-        self._last_roll = roll if roll == roll else None
-        if self._last_pitch is None:
-            pitch_str = "N/A"
-        else:
-            pitch_deg = math.degrees(self._last_pitch)
-            pitch_str = f"{pitch_deg:.1f}°"
-        self.pitch_label.config(text=f"Pitch: {pitch_str}")
-        if self._last_roll is None:
-            roll_str = "N/A"
-        else:
-            roll_deg = math.degrees(self._last_roll)
-            roll_str = f"{roll_deg:.1f}°"
-        self.roll_label.config(text=f"Roll: {roll_str}")
-        self.capture_status_label.config(text="")
+        logging.info("Requested telemetry streams (Modern & Legacy)")
 
-        # Rotate image to remove roll before any geometric calculations.
-        display_image = image.copy()
-        display_image2=image2.copy()
-        rotated_depth_map = depth_map.copy()
-        if self._last_roll is not None:
-            # Negative roll de-rotates the image so the horizon appears level.
-            roll_deg = math.degrees(self._last_roll)
-            display_image = display_image.rotate(
-                -roll_deg, expand=True, resample=Image.BICUBIC
+    def run(self) -> None:
+        try:
+            logging.info(f"Connecting to FC MAVLink: {self.connection_str}")
+            # Use FC_BAUD if it's a serial connection
+            self._mav = mavutil.mavlink_connection(
+                self.connection_str, baud=FC_BAUD, dialect="ardupilotmega"
             )
-            """ Do we need rotation matrix adjustment for YAW?
-            display_image2=display_image2.rotate(
-                -yaw_deg, expand=True, resample=Image.BICUBIC
+        except Exception as exc:
+            logging.error(f"MAVLink Connection failed: {exc}")
+            return
+
+        mav = self._mav
+        if mav is None:
+            logging.error("MAVLink Connection failed: no handle")
+            return
+
+        logging.info("Waiting for Heartbeat...")
+        try:
+            mav.wait_heartbeat(timeout=10)
+            logging.info(f"Heartbeat received from system {mav.target_system}")
+        except:
+            logging.warning(
+                "No heartbeat. Ensure FC is powered and baud rate/port is correct."
             )
-            """
-            rotated_depth_map = self._rotate_depth_map(rotated_depth_map, -roll_deg)
-
-        # Draw red dot in center of (possibly rotated) image
-        draw = ImageDraw.Draw(display_image)
-        draw2=ImageDraw.Draw(display_image2)
-        cx, cy = display_image.width // 2, display_image.height // 2
-        cx2,cy2=display_image2.width//2,display_image2.height//2
-        r = 2  # radius in pixels
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="red", outline="red")
-        draw2.ellipse([cx2-r,cy2-r,cx2+r,cy2+r], fill="red", outline="red")
-
-
-        self._base_display_image = display_image.copy()
-        self._base_depth_map = rotated_depth_map
-        self._base_display_image_arducam=display_image2.copy()
-        # Update image display
-        photo = ImageTk.PhotoImage(image=display_image)
-        ardu_photo = ImageTk.PhotoImage(image=display_image2)
-        self._current_ardu_photo=ardu_photo
-        self._current_photo = photo
-        self.image_label.config(image=photo)
-        self.ardu_image_label.config(image=ardu_photo)
-
-    def request_image(
-        self,
-    ) -> Tuple[float, float, float, float, Image.Image, Image.Image,np.ndarray]:
-        """
-        Connects to the transmitter, sends a capture command, and receives:
-        - downward range (float32), center depth (float32), pitch (float32 rad), roll (float32 rad)
-        - RGB JPEG length (uint64), depth PNG length (uint64)
-        - JPEG image bytes, 16-bit PNG depth bytes
-        Returns (downward_range_m, center_depth_m, pitch_rad, roll_rad, PIL.Image, depth_map_mm).
-        """
-        with socket.create_connection(
-            (TRANSMITTER_HOST, TRANSMITTER_PORT), timeout=SOCKET_TIMEOUT
-        ) as sock:
-            sock.settimeout(SOCKET_TIMEOUT)
-
-            # Send 1-byte capture command
-            sock.sendall(b"C")
-
-            header = self._recv_exact(sock, 40)
-            if len(header) != 40:
-                raise RuntimeError(
-                    f"Incomplete header received (expected 40 bytes, got {len(header)})"
-                )
-
-            downwards_range, center_depth, pitch, roll, image_length, depth_length, ardu_image_length = (
-                struct.unpack("!ffffQQQ", header)
-            )
-
-            if image_length == 0:
-                raise RuntimeError("Transmitter reported zero-length image from oak-d")
-            if depth_length == 0:
-                raise RuntimeError("Transmitter reported zero-length depth map")
-            if ardu_image_length==0:
-                raise RuntimeError("Transmitter reported zero-length image from arducam")
-
-            jpeg_bytes = self._recv_exact(sock, image_length)
-            if len(jpeg_bytes) != image_length:
-                raise RuntimeError(
-                    f"Incomplete oakd image received (expected {image_length} bytes, got {len(jpeg_bytes)})"
-                )
-            depth_bytes = self._recv_exact(sock, depth_length)
-            if len(depth_bytes) != depth_length:
-                raise RuntimeError(
-                    f"Incomplete depth map received (expected {depth_length} bytes, got {len(depth_bytes)})"
-                )
-            ardu_image_bytes=self._recv_exact(sock,ardu_image_length)
-            if len(ardu_image_bytes)!=ardu_image_length:
-                raise RuntimeError(
-                    f"Incomplete arducam image received (expected {ardu_image_length} bytes, got {len(ardu_image_bytes)})"
-                )
 
         try:
-            image = Image.open(io.BytesIO(jpeg_bytes))
-            image.load()
-            image2=Image.open(io.BytesIO(ardu_image_bytes))
-            image2.load()
+            self._request_telemetry_streams()
         except Exception as exc:
-            raise RuntimeError(f"Failed to decode JPEG image: {exc}") from exc
+            logging.error(f"Stream request failed: {exc}")
 
-        depth_buffer = np.frombuffer(depth_bytes, dtype=np.uint8)
-        depth_map = cv2.imdecode(depth_buffer, cv2.IMREAD_UNCHANGED)
-        if depth_map is None:
-            raise RuntimeError("Failed to decode depth PNG")
-        if depth_map.ndim != 2:
-            raise RuntimeError(f"Depth map has unexpected shape: {depth_map.shape}")
+        while not self._stop_event.is_set():
+            try:
+                msg = mav.recv_match(
+                    type=["DISTANCE_SENSOR", "RANGEFINDER", "ATTITUDE"],
+                    blocking=True,
+                    timeout=MAVLINK_TIMEOUT,
+                )
+                if msg is None:
+                    continue
 
-        return downwards_range, center_depth, pitch, roll, image,image2, depth_map
+                if msg.get_type() == "ATTITUDE":
+                    self.state.update(pitch=float(msg.pitch), roll=float(msg.roll))
 
-    @staticmethod
-    def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
-        """
-        Receive exactly num_bytes from the socket, unless the connection closes or times out.
-        """
-        data = bytearray()
-        while len(data) < num_bytes:
-            chunk = sock.recv(num_bytes - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-        return bytes(data)
+                elif msg.get_type() == "DISTANCE_SENSOR":
+                    dist = float(msg.current_distance) / 100.0
+                    sensor_id = getattr(msg, "id", 0)
+                    if sensor_id != 1:
+                        self.state.update(downward_range=dist)
+
+                elif msg.get_type() == "RANGEFINDER":
+                    dist = float(msg.distance)
+                    self.state.update(downward_range=dist)
+
+            except Exception as exc:
+                continue
 
 
-def main() -> None:
-    root = tk.Tk()
-    app = ReceiverApp(root)
-    root.mainloop()
+class OakCamera:
+    """Background capture for aligned RGB and depth frames from an OAK-D Pro."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width, self.height = width, height
+        self._pipeline: Optional[dai.Pipeline] = None
+        self._rgb_queue = None
+        self._depth_queue = None
+        self._lock = threading.Lock()
+        self._latest_rgb: Optional[np.ndarray] = None
+        self._latest_depth: Optional[np.ndarray] = None
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def _build_pipeline(self):
+        pipeline = dai.Pipeline()
+
+        rgb = pipeline.create(dai.node.ColorCamera)
+        left = pipeline.create(dai.node.MonoCamera)
+        right = pipeline.create(dai.node.MonoCamera)
+        stereo = pipeline.create(dai.node.StereoDepth)
+        rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        rgb.setPreviewSize(self.width, self.height)
+        rgb.setInterleaved(False)
+        rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        rgb.setFps(20)
+
+        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        left.setFps(20)
+        right.setFps(20)
+
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DENSITY)
+        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+        stereo.setOutputSize(self.width, self.height)
+        stereo.setSubpixel(True)
+        stereo.setLeftRightCheck(True)
+
+        left.out.link(stereo.left)
+        right.out.link(stereo.right)
+        return pipeline, rgb.preview, stereo.depth
+
+    def _capture_loop(self):
+        try:
+            pipeline, rgb_output, depth_output = self._build_pipeline()
+            self._rgb_queue = rgb_output.createOutputQueue(maxSize=2, blocking=False)
+            self._depth_queue = depth_output.createOutputQueue(
+                maxSize=2, blocking=False
+            )
+            pipeline.start()
+            self._pipeline = pipeline
+        except Exception as exc:
+            logging.exception("Failed to initialize OAK-D Pro pipeline")
+            return
+
+        while not self._stop_event.is_set():
+            rgb_frame = (
+                self._rgb_queue.tryGet() if self._rgb_queue is not None else None
+            )
+            depth_frame = (
+                self._depth_queue.tryGet() if self._depth_queue is not None else None
+            )
+
+            if rgb_frame is not None:
+                with self._lock:
+                    rgb_img = cast(Any, rgb_frame).getCvFrame()
+                    self._latest_rgb = rgb_img
+            if depth_frame is not None:
+                with self._lock:
+                    depth_img = cast(Any, depth_frame).getFrame().copy()
+                    self._latest_depth = depth_img
+            if rgb_frame is None and depth_frame is None:
+                time.sleep(0.01)
+
+    def capture_payloads(self) -> Tuple[bytes, bytes, float]:
+        with self._lock:
+            if self._latest_rgb is None or self._latest_depth is None:
+                return b"", b"", float("nan")
+            rgb_frame = self._latest_rgb
+            depth_frame = self._latest_depth
+
+        ok_jpeg, jpeg_buf = cv2.imencode(
+            ".jpg",
+            rgb_frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
+        )
+        ok_png, depth_buf = cv2.imencode(
+            ".png",
+            depth_frame,
+            [int(cv2.IMWRITE_PNG_COMPRESSION), DEPTH_PNG_COMPRESSION],
+        )
+        if not ok_jpeg or not ok_png:
+            return b"", b"", float("nan")
+
+        center_y = depth_frame.shape[0] // 2
+        center_x = depth_frame.shape[1] // 2
+        center_patch = depth_frame[
+            max(0, center_y - 4) : min(depth_frame.shape[0], center_y + 5),
+            max(0, center_x - 4) : min(depth_frame.shape[1], center_x + 5),
+        ]
+        valid = center_patch[center_patch > 0]
+        center_depth_m = (
+            float(np.median(valid) / 1000.0) if valid.size else float("nan")
+        )
+        return jpeg_buf.tobytes(), depth_buf.tobytes(), center_depth_m
+
+    def release(self):
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        if self._pipeline is not None:
+            self._pipeline.stop()
+
+
+class Arducam:
+    def __init__(self,height,width):
+        self.height=height
+        self.width=width
+        self.lock=threading.Lock()
+        self.last_frame=None
+        self._stop_event = threading.Event()
+        self.cap=cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,height)
+        self.thread=threading.Thread(target=self._capture_loop,daemon=True)
+        self.thread.start()
+
+    def _capture_loop(self):
+        while not self._stop_event.is_set():
+            ret,frame=self.cap.read()
+            if not ret:
+                time.sleep(0.01)
+            else:
+                with self.lock:
+                    self.last_frame=frame
+    
+    def release(self):
+        self._stop_event.set()
+        if self.thread.is_alive():
+            self.thread.join()
+        self.cap.release()
+
+    
+    def capture_payloads(self):
+        with self.lock:
+            if self.last_frame is None:
+                return b""
+            frame=self.last_frame.copy()
+        result,jpeg=cv2.imencode(".jpg",frame,[int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+        if not result:
+            return b""
+        return jpeg.tobytes()
+
+def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state: TelemetryState):
+    try:
+        if conn.recv(1) == b"C":
+            # Wait until pitch is within tolerance of level before capturing.
+            while True:
+                downward_range, pitch, roll = telemetry_state.get()
+                if not math.isnan(pitch) and abs(pitch) <= PITCH_LEVEL_TOLERANCE_RAD:
+                    #Wait for roll to be within tolerance of level as well
+                    if not math.isnan(roll) and abs(roll)<= ROLL_LEVEL_TOLERANCE_RAD:
+                        break
+                # Update at ~50 Hz while waiting for level
+                time.sleep(0.02)
+            jpeg_bytes_ardu=camera2.capture_payloads()
+            jpeg_bytes, depth_bytes, center_depth_m = camera.capture_payloads()
+            header = struct.pack(
+                "!ffffQQQ",
+                float(downward_range),
+                float(center_depth_m),
+                float(pitch),
+                float(roll),
+                len(jpeg_bytes),
+                len(depth_bytes),
+                len(jpeg_bytes_ardu)
+            )
+            conn.sendall(header + jpeg_bytes + depth_bytes + jpeg_bytes_ardu)
+    finally:
+        conn.close()
+
+        
+
+
+def run_server():
+    telemetry_state = TelemetryState()
+    mav_thread = MavlinkReader(FC_ADDR, telemetry_state)
+    mav_thread.start()
+    camera = OakCamera(FRAME_WIDTH, FRAME_HEIGHT)
+    camera_down=Arducam(ARDU_HEIGHT,ARDU_WIDTH)
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_sock.bind((HOST, PORT))
+    server_sock.listen(5)
+    logging.info(f"Server alive on port {PORT}")
+
+    try:
+        while True:
+            conn, addr = server_sock.accept()
+            handle_client(conn, addr, camera,camera_down, telemetry_state)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        camera.release()
+        mav_thread.stop()
+        server_sock.close()
 
 
 if __name__ == "__main__":
-    main()
+    run_server()
