@@ -334,6 +334,7 @@ class Arducam:
         self._stop_event = threading.Event()
         self._picam: Optional[Any] = None
         self._started = False
+        self._logged_first_frame = False
 
         if Picamera2 is None:
             logging.warning(
@@ -342,9 +343,16 @@ class Arducam:
             return
 
         try:
+            logging.info("Initializing CSI camera %s", self.camera_index)
             self._picam = Picamera2(camera_num=self.camera_index)
             config = self._picam.create_preview_configuration(
                 main={"size": (width, height), "format": "RGB888"}
+            )
+            logging.info(
+                "Configuring CSI camera %s preview stream to %sx%s",
+                self.camera_index,
+                self.width,
+                self.height,
             )
             self._picam.configure(config)
             self._picam.start()
@@ -387,6 +395,14 @@ class Arducam:
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             with self.lock:
                 self.last_frame = frame_bgr
+            if not self._logged_first_frame:
+                logging.info(
+                    "Received first CSI frame from camera %s (%sx%s)",
+                    self.camera_index,
+                    frame_bgr.shape[1],
+                    frame_bgr.shape[0],
+                )
+                self._logged_first_frame = True
     
     def release(self):
         self._stop_event.set()
@@ -402,32 +418,65 @@ class Arducam:
                 self._picam.close()
             except Exception:
                 pass
+        logging.info("Released CSI camera %s", self.camera_index)
 
     
     def capture_payloads(self):
         with self.lock:
             if self.last_frame is None:
+                logging.warning("CSI capture requested before first frame was available")
                 return b""
-            frame=self.last_frame.copy()
-        result,jpeg=cv2.imencode(".jpg",frame,[int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+            frame = self.last_frame.copy()
+        result, jpeg = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+        )
         if not result:
+            logging.error("Failed to JPEG-encode CSI frame")
             return b""
+        logging.info("Prepared CSI JPEG payload (%s bytes)", len(jpeg))
         return jpeg.tobytes()
 
 def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state: TelemetryState):
     try:
-        if conn.recv(1) == b"C":
+        logging.info("Client connected from %s", addr)
+        request_code = conn.recv(1)
+        logging.info("Received client request code %r", request_code)
+        if request_code == b"C":
+            logging.info("Capture request acknowledged; waiting for vehicle to level")
             # Wait until pitch is within tolerance of level before capturing.
+            wait_logged = False
             while True:
                 downward_range, pitch, roll = telemetry_state.get()
                 if not math.isnan(pitch) and abs(pitch) <= PITCH_LEVEL_TOLERANCE_RAD:
                     #Wait for roll to be within tolerance of level as well
                     if not math.isnan(roll) and abs(roll)<= ROLL_LEVEL_TOLERANCE_RAD:
+                        logging.info(
+                            "Vehicle level condition met (pitch=%.4f rad, roll=%.4f rad)",
+                            pitch,
+                            roll,
+                        )
                         break
+                if not wait_logged:
+                    logging.info(
+                        "Waiting for level attitude; current pitch=%s roll=%s range=%s",
+                        pitch,
+                        roll,
+                        downward_range,
+                    )
+                    wait_logged = True
                 # Update at ~50 Hz while waiting for level
                 time.sleep(0.02)
-            jpeg_bytes_ardu=camera2.capture_payloads()
+            logging.info("Capturing CSI JPEG payload")
+            jpeg_bytes_ardu = camera2.capture_payloads()
+            logging.info("Capturing OAK-D RGB and depth payloads")
             jpeg_bytes, depth_bytes, center_depth_m = camera.capture_payloads()
+            logging.info(
+                "Prepared payloads: oak_rgb=%s bytes, oak_depth=%s bytes, csi=%s bytes, center_depth=%.3f m",
+                len(jpeg_bytes),
+                len(depth_bytes),
+                len(jpeg_bytes_ardu),
+                center_depth_m,
+            )
             header = struct.pack(
                 "!ffffQQQ",
                 float(downward_range),
@@ -439,8 +488,12 @@ def handle_client(conn, addr, camera: OakCamera,camera2:Arducam, telemetry_state
                 len(jpeg_bytes_ardu)
             )
             conn.sendall(header + jpeg_bytes + depth_bytes + jpeg_bytes_ardu)
+            logging.info("Capture payload sent to %s", addr)
+        else:
+            logging.warning("Ignoring unknown client request code %r from %s", request_code, addr)
     finally:
         conn.close()
+        logging.info("Closed client connection from %s", addr)
 
         
 
@@ -449,8 +502,10 @@ def run_server():
     telemetry_state = TelemetryState()
     mav_thread = MavlinkReader(FC_ADDR, telemetry_state)
     mav_thread.start()
+    logging.info("MAVLink reader thread started")
     camera = OakCamera(FRAME_WIDTH, FRAME_HEIGHT)
-    camera_down=Arducam(ARDU_HEIGHT,ARDU_WIDTH)
+    logging.info("OAK-D capture thread started")
+    camera_down = Arducam(ARDU_HEIGHT, ARDU_WIDTH)
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind((HOST, PORT))
@@ -468,6 +523,7 @@ def run_server():
         camera_down.release()
         mav_thread.stop()
         server_sock.close()
+        logging.info("Server shutdown complete")
 
 
 if __name__ == "__main__":
