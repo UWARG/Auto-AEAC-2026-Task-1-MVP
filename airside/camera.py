@@ -12,7 +12,7 @@ import cv2
 import logging
 import time
 from pathlib import Path
-from typing import Literal, List, Tuple, Sequence
+from typing import Literal, List, Sequence
 
 from warg_common.simulator import SimCamera
 
@@ -36,15 +36,11 @@ class Camera:
     """
 
     OAK_FRAME_SIZE = (640, 480)
-    OAK_RGB_STREAM_NAME = "oak_rgb"
-    OAK_DET_STREAM_NAME = "oak_detections"
     # Default camera settings optimized for IR beacon detection
     DEFAULT_EXPOSURE_TIME = 15  # microseconds - very fast to reduce motion blur
     DEFAULT_ANALOGUE_GAIN = 16.0  # high gain to amplify IR beacon signal
     DEFAULT_AUTO_EXPOSURE = False  # disable to maintain consistent brightness
     DEFAULT_OAK_CONFIDENCE_THRESHOLD = 0.5
-    DEFAULT_OAK_IOU_THRESHOLD = 0.5
-    DEFAULT_OAK_COORDINATE_SIZE = 4
     # Replace this map when the landing-pad model is swapped for the AEAC target model.
     DEFAULT_OAK_LABEL_MAP = (
         Colours.RED,
@@ -67,11 +63,6 @@ class Camera:
         oak_model_path: str | Path | None = None,
         oak_label_map: Sequence[Colours] | None = None,
         oak_confidence_threshold: float = DEFAULT_OAK_CONFIDENCE_THRESHOLD,
-        oak_iou_threshold: float = DEFAULT_OAK_IOU_THRESHOLD,
-        oak_coordinate_size: int = DEFAULT_OAK_COORDINATE_SIZE,
-        oak_num_classes: int | None = None,
-        oak_anchors: Sequence[float] | None = None,
-        oak_anchor_masks: dict[str, list[int]] | None = None,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -94,7 +85,6 @@ class Camera:
         self.use_oak_inference = use_oak_inference
         # OAK-D specific state
         self._oakd_pipeline = None
-        self._oakd_device = None
         self._oakd_current_frame = None
         self._oakd_queue = None
         self.det_queue = None
@@ -102,11 +92,6 @@ class Camera:
         self.oak_model_path = Path(oak_model_path) if oak_model_path else None
         self.oak_label_map = tuple(oak_label_map or self.DEFAULT_OAK_LABEL_MAP)
         self.oak_confidence_threshold = oak_confidence_threshold
-        self.oak_iou_threshold = oak_iou_threshold
-        self.oak_coordinate_size = oak_coordinate_size
-        self.oak_num_classes = oak_num_classes or len(self.oak_label_map)
-        self.oak_anchors = list(oak_anchors) if oak_anchors else None
-        self.oak_anchor_masks = dict(oak_anchor_masks) if oak_anchor_masks else None
         print("mode", self.mode)
 
         # Retry camera initialization
@@ -162,28 +147,32 @@ class Camera:
 
             try:
                 self._oakd_pipeline = dai.Pipeline()
-                cam_rgb = self._oakd_pipeline.create(dai.node.ColorCamera)
-                cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-                cam_rgb.setPreviewSize(*self.OAK_FRAME_SIZE)
-                cam_rgb.setInterleaved(False)
-                cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-
-                xout_rgb = self._oakd_pipeline.create(dai.node.XLinkOut)
-                xout_rgb.setStreamName(self.OAK_RGB_STREAM_NAME)
-                cam_rgb.preview.link(xout_rgb.input)
-
+                camera_node = self._oakd_pipeline.create(dai.node.Camera).build(
+                    dai.CameraBoardSocket.CAM_A
+                )
                 self._oakd_has_detection_network = False
                 if self.use_oak_inference:
-                    self._configure_oak_detection_network(dai, cam_rgb)
-
-                self._oakd_device = dai.Device(self._oakd_pipeline)
-                self._oakd_queue = self._oakd_device.getOutputQueue(
-                    name=self.OAK_RGB_STREAM_NAME, maxSize=4, blocking=False
-                )
-                if self._oakd_has_detection_network:
-                    self.det_queue = self._oakd_device.getOutputQueue(
-                        name=self.OAK_DET_STREAM_NAME, maxSize=4, blocking=False
+                    detection_network = self._configure_oak_detection_network(
+                        dai, camera_node
                     )
+                    if detection_network is not None:
+                        self._oakd_queue = detection_network.passthrough.createOutputQueue(
+                            maxSize=4, blocking=False
+                        )
+                        self.det_queue = detection_network.out.createOutputQueue(
+                            maxSize=4, blocking=False
+                        )
+                        self._oakd_has_detection_network = True
+
+                if self._oakd_queue is None:
+                    rgb_output = camera_node.requestOutput(
+                        self.OAK_FRAME_SIZE, type=dai.ImgFrame.Type.BGR888p
+                    )
+                    self._oakd_queue = rgb_output.createOutputQueue(
+                        maxSize=4, blocking=False
+                    )
+
+                self._oakd_pipeline.start()
                 logging.info(f"OAK-D camera initialized successfully")
                 return True
             except Exception as e:
@@ -328,50 +317,46 @@ class Camera:
         else:
             return self._find_targets_cv2(frame)
 
-    def _configure_oak_detection_network(self, dai, cam_rgb) -> None:
+    def _configure_oak_detection_network(self, dai, camera_node):
         """
-        Configure the OAK-D YOLO detection network if a supported model export exists.
+        Configure the OAK-D detection network using the DepthAI v3 DetectionNetwork node.
         """
         if self.oak_model_path is None:
             logging.warning(
                 "OAK inference enabled, but no exported model path was provided. "
-                "Set oak_model_path to a DepthAI-compatible .blob export."
+                "Set oak_model_path to a DepthAI-compatible NNArchive export."
             )
-            return
+            return None
 
         if self.oak_model_path.suffix.lower() == ".pt":
             logging.warning(
                 "DepthAI cannot load a raw .pt model directly. Export the landing-pad "
-                "model to a DepthAI-compatible .blob, then update oak_model_path."
+                "model to a DepthAI-compatible NNArchive, then update oak_model_path."
             )
-            return
+            return None
+
+        if self.oak_model_path.suffix.lower() == ".blob":
+            logging.warning(
+                "DepthAI v3 DetectionNetwork expects an NNArchive or model description. "
+                "Export this model as an NNArchive, then update oak_model_path."
+            )
+            return None
 
         if not self.oak_model_path.exists():
             logging.warning(
-                "OAK model blob not found at %s. Detection network will not be enabled.",
+                "OAK model archive not found at %s. Detection network will not be enabled.",
                 self.oak_model_path,
             )
-            return
+            return None
 
-        yolo_det = self._oakd_pipeline.create(dai.node.YoloDetectionNetwork)
-        yolo_det.setBlobPath(str(self.oak_model_path))
-        yolo_det.setConfidenceThreshold(self.oak_confidence_threshold)
-        yolo_det.setNumClasses(self.oak_num_classes)
-        yolo_det.setCoordinateSize(self.oak_coordinate_size)
-        yolo_det.setIouThreshold(self.oak_iou_threshold)
-        yolo_det.input.setBlocking(False)
+        model_archive = dai.NNArchive(str(self.oak_model_path))
+        detection_network = self._oakd_pipeline.create(
+            dai.node.DetectionNetwork
+        ).build(camera_node, model_archive)
+        detection_network.setConfidenceThreshold(self.oak_confidence_threshold)
+        detection_network.input.setBlocking(False)
 
-        if self.oak_anchors:
-            yolo_det.setAnchors(self.oak_anchors)
-        if self.oak_anchor_masks:
-            yolo_det.setAnchorMasks(self.oak_anchor_masks)
-
-        xout_det = self._oakd_pipeline.create(dai.node.XLinkOut)
-        xout_det.setStreamName(self.OAK_DET_STREAM_NAME)
-
-        cam_rgb.preview.link(yolo_det.input)
-        yolo_det.out.link(xout_det.input)
-        self._oakd_has_detection_network = True
+        return detection_network
 
     def _find_targets_oak(self) -> List[TargetDetection]:
         """
