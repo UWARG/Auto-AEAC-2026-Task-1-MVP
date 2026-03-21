@@ -11,7 +11,8 @@ import numpy as np
 import cv2
 import logging
 import time
-from typing import Literal, List, Tuple
+from pathlib import Path
+from typing import Literal, List, Sequence
 
 from warg_common.simulator import SimCamera
 
@@ -34,10 +35,21 @@ class Camera:
     Handles Raspberry Pi Camera Module 2 operations
     """
 
+    OAK_FRAME_SIZE = (640, 480)
     # Default camera settings optimized for IR beacon detection
     DEFAULT_EXPOSURE_TIME = 15  # microseconds - very fast to reduce motion blur
     DEFAULT_ANALOGUE_GAIN = 16.0  # high gain to amplify IR beacon signal
     DEFAULT_AUTO_EXPOSURE = False  # disable to maintain consistent brightness
+    DEFAULT_OAK_CONFIDENCE_THRESHOLD = 0.5
+    # Replace this map when the landing-pad model is swapped for the AEAC target model.
+    DEFAULT_OAK_LABEL_MAP = (
+        Colours.RED,
+        Colours.GREEN,
+        Colours.BLUE,
+        Colours.YELLOW,
+        Colours.WHITE,
+        Colours.BLACK,
+    )
 
     def __init__(
         self,
@@ -47,6 +59,10 @@ class Camera:
         auto_exposure: bool = DEFAULT_AUTO_EXPOSURE,
         mode: Literal["rpi", "webcam", "sim", "oakd", "dummy"] = "rpi",
         mav_comm=None,
+        use_oak_inference: bool = True,
+        oak_model_path: str | Path | None = None,
+        oak_label_map: Sequence[Colours] | None = None,
+        oak_confidence_threshold: float = DEFAULT_OAK_CONFIDENCE_THRESHOLD,
     ) -> None:
         """
         Initialize and configure the Raspberry Pi Camera Module 2.
@@ -66,10 +82,16 @@ class Camera:
         self.mode = mode
         self._camera: BaseCameraDevice | None = None
         self._mav_comm = mav_comm
+        self.use_oak_inference = use_oak_inference
         # OAK-D specific state
         self._oakd_pipeline = None
         self._oakd_current_frame = None
         self._oakd_queue = None
+        self.det_queue = None
+        self._oakd_has_detection_network = False
+        self.oak_model_path = Path(oak_model_path) if oak_model_path else None
+        self.oak_label_map = tuple(oak_label_map or self.DEFAULT_OAK_LABEL_MAP)
+        self.oak_confidence_threshold = oak_confidence_threshold
         print("mode", self.mode)
 
         # Retry camera initialization
@@ -125,10 +147,31 @@ class Camera:
 
             try:
                 self._oakd_pipeline = dai.Pipeline()
-                cam = self._oakd_pipeline.create(dai.node.Camera).build()
-                self._oakd_queue = cam.requestOutput(
-                    (640, 480), dai.ImgFrame.Type.BGR888p
-                ).createOutputQueue(maxSize=4, blocking=False)
+                camera_node = self._oakd_pipeline.create(dai.node.Camera).build(
+                    dai.CameraBoardSocket.CAM_A
+                )
+                self._oakd_has_detection_network = False
+                if self.use_oak_inference:
+                    detection_network = self._configure_oak_detection_network(
+                        dai, camera_node
+                    )
+                    if detection_network is not None:
+                        self._oakd_queue = detection_network.passthrough.createOutputQueue(
+                            maxSize=4, blocking=False
+                        )
+                        self.det_queue = detection_network.out.createOutputQueue(
+                            maxSize=4, blocking=False
+                        )
+                        self._oakd_has_detection_network = True
+
+                if self._oakd_queue is None:
+                    rgb_output = camera_node.requestOutput(
+                        self.OAK_FRAME_SIZE, type=dai.ImgFrame.Type.BGR888p
+                    )
+                    self._oakd_queue = rgb_output.createOutputQueue(
+                        maxSize=4, blocking=False
+                    )
+
                 self._oakd_pipeline.start()
                 logging.info(f"OAK-D camera initialized successfully")
                 return True
@@ -261,12 +304,120 @@ class Camera:
     def find_targets(self, frame: np.ndarray) -> List[TargetDetection]:
         """
         Detect colored circular targets in the frame.
+        Flag-able dual path detection using CV2 or OAK-D.
         Returns the color of the circular target closest to the frame center.
         """
         if frame is None or frame.size == 0:
-            logging.warning("Invalid frame provided to colour_in_frame method")
+            logging.warning("Invalid frame provided to find_targets method")
             return []
 
+        # If flag is true then use OAK-D detection, otherwise use CV2 (defaults to OAK-D)
+        if self.use_oak_inference:
+            return self._find_targets_oak()
+        else:
+            return self._find_targets_cv2(frame)
+
+    def _configure_oak_detection_network(self, dai, camera_node):
+        """
+        Configure the OAK-D detection network using the DepthAI v3 DetectionNetwork node.
+        """
+        if self.oak_model_path is None:
+            logging.warning(
+                "OAK inference enabled, but no exported model path was provided. "
+                "Set oak_model_path to a DepthAI-compatible NNArchive export."
+            )
+            return None
+
+        if self.oak_model_path.suffix.lower() == ".pt":
+            logging.warning(
+                "DepthAI cannot load a raw .pt model directly. Export the landing-pad "
+                "model to a DepthAI-compatible NNArchive, then update oak_model_path."
+            )
+            return None
+
+        if self.oak_model_path.suffix.lower() == ".blob":
+            logging.warning(
+                "DepthAI v3 DetectionNetwork expects an NNArchive or model description. "
+                "Export this model as an NNArchive, then update oak_model_path."
+            )
+            return None
+
+        if not self.oak_model_path.exists():
+            logging.warning(
+                "OAK model archive not found at %s. Detection network will not be enabled.",
+                self.oak_model_path,
+            )
+            return None
+
+        model_archive = dai.NNArchive(str(self.oak_model_path))
+        detection_network = self._oakd_pipeline.create(
+            dai.node.DetectionNetwork
+        ).build(camera_node, model_archive)
+        detection_network.setConfidenceThreshold(self.oak_confidence_threshold)
+        detection_network.input.setBlocking(False)
+
+        return detection_network
+
+    def _find_targets_oak(self) -> List[TargetDetection]:
+        """
+        OAK-D target detection path from find_targets method.
+        """
+        if self.det_queue is None:
+            logging.warning("OAK-D detection queue is not initialized")
+            return []
+
+        detections = self.det_queue.tryGet()
+        if detections is None:
+            return []
+
+        frame_width, frame_height = self.OAK_FRAME_SIZE
+        if self._oakd_current_frame is not None:
+            current_frame = self._oakd_current_frame.getCvFrame()
+            frame_height, frame_width = current_frame.shape[:2]
+
+        targets = []
+        for detection in detections.detections:
+            if detection.label < 0 or detection.label >= len(self.oak_label_map):
+                logging.warning(
+                    "Skipping OAK-D detection with out-of-range label %s", detection.label
+                )
+                continue
+
+            xmin = max(0, min(int(detection.xmin * frame_width), frame_width - 1))
+            ymin = max(0, min(int(detection.ymin * frame_height), frame_height - 1))
+            xmax = max(0, min(int(detection.xmax * frame_width), frame_width - 1))
+            ymax = max(0, min(int(detection.ymax * frame_height), frame_height - 1))
+
+            if xmax <= xmin or ymax <= ymin:
+                continue
+
+            contour = np.array(
+                [[[xmin, ymin]], [[xmax, ymin]], [[xmax, ymax]], [[xmin, ymax]]],
+                dtype=np.int32,
+            )
+            colour = self.oak_label_map[detection.label].value
+            center_x = (xmin + xmax) / 2
+            center_y = (ymin + ymax) / 2
+            area = float((xmax - xmin) * (ymax - ymin))
+
+            targets.append(
+                TargetDetection(
+                    colour,
+                    center_x,
+                    center_y,
+                    1.0,
+                    1.0,
+                    area,
+                    contour,
+                )
+            )
+
+        return targets
+
+    def _find_targets_cv2(self, frame: np.ndarray) -> List[TargetDetection]:
+        """
+        CV2 target detection path from find_targets method
+        """
         frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         targets = []
