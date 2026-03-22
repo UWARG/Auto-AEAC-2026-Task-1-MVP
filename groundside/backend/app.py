@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import socket
 import struct
-from typing import Tuple
+from typing import Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import cv2
 from flask import Flask, jsonify, request
@@ -17,9 +17,38 @@ import base64
 import threading
 
 
+# Click mode for "Generate output" flow
+SELECT_TARGET = "target"
+SELECT_REFERENCE = "reference"
+
+# Crosshair colors (match prompt text color)
+TARGET_CROSSHAIR_COLOUR = "lime"  # green, for "Select target center"
+REFERENCE_CROSSHAIR_COLOUR = "deepskyblue"  # blue, for "Select reference point"
+CROSSHAIR_SIZE = 8  # half-length of each crosshair arm in pixels
+
+
+# =========================
+# Configuration
+# =========================
+
+# IP and port of the transmitter (Raspberry Pi on the drone)
 TRANSMITTER_HOST = "192.168.232.15"
 TRANSMITTER_PORT = 5000
+
 SOCKET_TIMEOUT = 10.0  # seconds
+
+# Camera FOV (radians) used to project clicked pixels into metric offsets
+CAMERA_HFOV_RAD = math.radians(80)
+CAMERA_VFOV_RAD = math.radians(55)
+
+ARDU_CAMERA_VFOV_RAD=math.radians(55)
+ARDU_CAMERA_HFOV_RAD=math.radians(80)
+
+
+# Fisheye correction (only near the edges). Correction = 1 + this * (angle / edge_angle)^2.
+# 0.0 = no correction. Use e.g. 0.1–0.3 if the lens compresses angles toward the edges.
+FISHEYE_EDGE_FACTOR = 0.0
+
 
 
 app = Flask(__name__)
@@ -191,6 +220,100 @@ def handle_capture_success(
     return display_image,display_image2
 
 
+def sample_depth_m(x: int, y: int,depth_map:np.ndarray, radius: int = 4) -> Optional[float]:
+    if depth_map is None:
+        return None
+    height, width = depth_map.shape[:2]
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return None
+    x0 = max(0, x - radius)
+    x1 = min(width, x + radius + 1)
+    y0 = max(0, y - radius)
+    y1 = min(height, y + radius + 1)
+    patch = depth_map[y0:y1, x0:x1]
+    valid = patch[patch > 0]
+    if valid.size == 0:
+        return None
+    return float(np.median(valid) / 1000.0)
+
+def compute_delta_up_sideways_m(
+    x1:int,
+    y1:int,
+    x2:int,
+    y2:int,
+    oakd_image:Image.Image,
+    depth_map:np.ndarray
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Distance up (vertical) and sideways (horizontal) in metres between the two
+    selected points (point 1 = target_xy, point 2 = ref_xy). Uses FOV and
+    sampled OAK-D depth at each point.
+    Returns (delta_up_m, delta_sideways_m); either can be None if unavailable.
+    """
+    if (
+        oakd_image is None
+        or x1 is None
+        or x2 is None
+        or y1 is None
+        or y2 is None
+    ):
+        return None, None
+    W, H = oakd_image.width, oakd_image.height
+    depth1 = sample_depth_m(x1, y1,depth_map=depth_map)
+    depth2 = sample_depth_m(x2, y2,depth_map=depth_map)
+    if depth1 is None or depth2 is None:
+        return None, None
+    half_vfov = CAMERA_VFOV_RAD / 2
+    half_hfov = CAMERA_HFOV_RAD / 2
+    # Vertical angles (rad)
+    a1 = (y1 - H / 2) / (H / 2) * half_vfov
+    a2 = (y2 - H / 2) / (H / 2) * half_vfov
+    a1 = a1 * (1.0 + FISHEYE_EDGE_FACTOR * (a1 / half_vfov) ** 2)
+    a2 = a2 * (1.0 + FISHEYE_EDGE_FACTOR * (a2 / half_vfov) ** 2)
+    delta_up = (depth2 * math.tan(a2)) - (depth1 * math.tan(a1))
+    # Horizontal angles (rad)
+    b1 = (x1 - W / 2) / (W / 2) * half_hfov
+    b2 = (x2 - W / 2) / (W / 2) * half_hfov
+    b1 = b1 * (1.0 + FISHEYE_EDGE_FACTOR * (b1 / half_hfov) ** 2)
+    b2 = b2 * (1.0 + FISHEYE_EDGE_FACTOR * (b2 / half_hfov) ** 2)
+    delta_sideways = (depth2 * math.tan(b2)) - (depth1 * math.tan(b1))
+    return delta_up, delta_sideways
+
+def draw_manual_measurements(x_target:float,
+                             y_target:float,
+                             x_ref:float,
+                             y_ref:float,
+                             oakd_image:Image.Image,
+                             depth_map:np.ndarray) -> None:
+    """Draw both points and the distance up/sideways between them on the image."""
+    if oakd_image is None:
+        return
+    delta_up, delta_sideways = compute_delta_up_sideways_m(x_target,y_target,x_ref,y_ref,oakd_image,depth_map)
+    draw = ImageDraw.Draw(oakd_image)
+    s = CROSSHAIR_SIZE
+    if x_target is not None and y_target is not None:
+        tx=x_target
+        ty=y_target
+        draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+        draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+    if x_ref is not None and y_ref is not None:
+        rx=x_ref
+        ry=y_ref
+        draw.line(
+            (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+        )
+        draw.line(
+            (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+        )
+    up_str = f"{delta_up:.2f} m" if delta_up is not None else "N/A"
+    side_str = f"{delta_sideways:.2f} m" if delta_sideways is not None else "N/A"
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except (OSError, ImportError):
+        font = ImageFont.load_default()
+    draw.text((10, 10), f"Up: {up_str}", fill="white", font=font)
+    draw.text((10, 28), f"Sideways: {side_str}", fill="white", font=font)
+    return oakd_image
 
 def load_db():
     with open(DB_PATH, "r", encoding="utf-8") as f:
@@ -285,6 +408,34 @@ def capture_image():
         })
     finally:
         capture_in_progress.release()
+@app.route("/api/generate_output",methods=["POST"])
+def generate_output():
+    payload = request.get_json(silent=True) or {}
+    ref_x=str(payload.get("reference_x","")).strip()
+    ref_y=str(payload.get("reference_y","")).strip()
+    targ_x=str(payload.get("target_x","")).strip()
+    targ_y=str(payload.get("target_y","")).strip()
+    mode=str(payload.get("mode","")).strip()
+    color=str(payload.get("color","")).strip()
+    ref_desc=str(payload.get("ref_description","")).strip()
+    db=load_db()
+    if not db["captures"]:
+        return jsonify({"message":"Capture image first"}),400
+    latest=db["captures"][-1]
+    if not latest["ardufile_name"] or not latest["oakd_name"] or not latest["time"] or not latest["depth_map_name"]:
+        return jsonify({"message":"Invalid Image data"}),400
+    ardufile_image=Image.open(latest["ardufile_name"])
+    oakd_image=Image.open(latest["oakd_name"])
+    depth_map=np.load(latest["depth_map_name"])
+
+    if not ref_x or not ref_y or not targ_x or not targ_y or not mode or not color or not ref_desc:
+        return jsonify({"message":"missing data"}),400
+    if mode == "full_manual":
+        new_oakd_image=draw_manual_measurements(targ_x,targ_y,ref_x,ref_y,oakd_image,depth_map)
+
+
+    
+
 
 
 if __name__ == "__main__":
