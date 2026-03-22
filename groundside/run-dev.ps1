@@ -106,7 +106,7 @@ Write-Host "[info] press Ctrl+C to stop both services" -ForegroundColor Yellow
 
 $processes = @(
   (Start-LoggedProcess -Name "backend" -Color "Cyan" -FilePath $python -Arguments @("app.py") -WorkingDirectory $backendDir),
-  (Start-LoggedProcess -Name "frontend" -Color "Green" -FilePath "pnpm" -Arguments @("dev") -WorkingDirectory $frontendDir)
+  (Start-LoggedProcess -Name "frontend" -Color "Green" -FilePath "pnpm.cmd" -Arguments @("dev") -WorkingDirectory $frontendDir)
 )
 
 try {
