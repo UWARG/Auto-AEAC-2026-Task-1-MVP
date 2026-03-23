@@ -211,13 +211,15 @@ def handle_capture_success(
     display_image2.save(arducam_name,format="JPEG")
     np.save(depth_map_name,rotated_depth_map)
 
+    #get image in bytes
+
     latest["ardufile_name"]=str(arducam_name)
     latest["oakd_name"]=str(oakd_name)
     latest["time"]=timestamp
     latest["depth_map_name"]=str(depth_map_name)
     db["captures"].append(latest)
     save_db(db)
-    return display_image,display_image2
+    return oakd_name,arducam_name
 
 
 def sample_depth_m(x: int, y: int,depth_map:np.ndarray, radius: int = 4) -> Optional[float]:
@@ -284,7 +286,7 @@ def draw_manual_measurements(x_target:float,
                              x_ref:float,
                              y_ref:float,
                              oakd_image:Image.Image,
-                             depth_map:np.ndarray) -> None:
+                             depth_map:np.ndarray) -> Image.Image:
     """Draw both points and the distance up/sideways between them on the image."""
     if oakd_image is None:
         return
@@ -314,6 +316,126 @@ def draw_manual_measurements(x_target:float,
     draw.text((10, 10), f"Up: {up_str}", fill="white", font=font)
     draw.text((10, 28), f"Sideways: {side_str}", fill="white", font=font)
     return oakd_image
+
+
+def compute_corrected_up_m(x:int,y:int,downward:float,img:Image.Image) -> Optional[float]:
+    """
+    Corrected 'up' distance (m): downward rangefinder minus the vertical offset of the
+    target from the drone, using the target's sampled OAK-D depth and the vertical FOV.
+    Returns None if readings or image are missing/invalid.
+    """
+    if img is None or x is None or y is None:
+        return None
+    d_down = downward
+    tx, ty = x,y
+    target_depth = sample_depth_m(tx, ty)
+    if d_down is None or target_depth is None:
+        return None
+    if d_down != d_down or target_depth != target_depth:  # NaN
+        return None
+    H = img.height
+    # Vertical angle from image center (rad): positive when target below center
+    half_vfov = CAMERA_VFOV_RAD / 2
+    angle_v = (ty - H / 2) / (H / 2) * half_vfov
+    angle_v = angle_v * (1.0 + FISHEYE_EDGE_FACTOR * (angle_v / half_vfov) ** 2)
+    delta_h = target_depth * math.tan(angle_v)
+    return d_down - delta_h
+
+def compute_lateral_offset_m(img:Image.Image,x_tar:int,y_tar:int,x_ref:int,y_ref:int,depth_map:np.ndarray) -> Optional[float]:
+    """
+    Horizontal distance (m) of the target from the reference, using each point's
+    sampled OAK-D depth and the horizontal FOV. Positive = target to the right
+    of reference in image.
+    Returns None if cannot compute.
+    """
+    if (
+        img is None
+        or x_tar is None or y_tar is None
+        or x_ref or y_ref is None
+    ):
+        return None
+    W = img.width
+    tx, ty = x_tar,y_tar
+    rx, ry = x_ref,y_ref
+    target_depth = sample_depth_m(tx, ty,depth_map)
+    ref_depth = sample_depth_m(rx, ry,depth_map)
+    if target_depth is None or ref_depth is None:
+        return None
+    half_hfov = CAMERA_HFOV_RAD / 2
+    angle_tx = (tx - W / 2) / (W / 2) * half_hfov
+    angle_rx = (rx - W / 2) / (W / 2) * half_hfov
+    angle_tx = angle_tx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_tx / half_hfov) ** 2)
+    angle_rx = angle_rx * (1.0 + FISHEYE_EDGE_FACTOR * (angle_rx / half_hfov) ** 2)
+    target_x_m = target_depth * math.tan(angle_tx)
+    ref_x_m = ref_depth * math.tan(angle_rx)
+    return target_x_m - ref_x_m
+
+
+def compute_cross_camera_offset(x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,target_on_ground:bool,ardu_image:Image.Image,oakd_image:Image.Image) -> tuple[float,float,float]|None:
+    if not target_on_ground:
+        return None
+    tx, ty = x_tar,y_tar
+    rx, ry = x_ref,y_ref
+    ref_depth=sample_depth_m(rx,ry)
+    downward_range=downward
+    if ref_depth is None or downward_range is None:
+        return None
+    half_hfov=CAMERA_HFOV_RAD/2
+    half_vfov=CAMERA_VFOV_RAD/2
+    W=oakd_image.width
+    H=oakd_image.height
+    a_horizontal=((rx-W/2)/(W/2))*half_hfov
+    a_vertical=((ry-H/2)/(H/2))*half_vfov
+    ref_x=ref_depth
+    ref_y=ref_depth*math.tan(a_horizontal)
+    ref_z=ref_depth*math.tan(a_vertical)
+    #for arducam ground target
+    W=ardu_image.width
+    H=ardu_image.height
+    half_hfov=ARDU_CAMERA_HFOV_RAD/2
+    half_vfov=ARDU_CAMERA_VFOV_RAD/2
+    a_horizontal=((tx-W/2)/(W/2))*half_hfov
+    a_vertical=((H/2-ty)/(H/2))*half_vfov #flip h/2 and ty signs for oakd to be facing in positive x dir
+    target_x=downward_range*math.tan(a_vertical) 
+    target_y=downward_range*math.tan(a_horizontal)
+    target_z=downward_range
+    #positive coordinates:
+    #oak-d image right
+    #down
+    #arducam up
+    return (target_x-ref_x, #should always be negative
+            target_y-ref_y,
+            target_z-ref_z)
+def write_output(colour: str, ref_desc: str,x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,ardu_image:Image.Image,oakd_image:Image.Image,depth_map:np.ndarray,target_on_ground:bool) -> None:
+    """Build the output sentence and write it to the output text box."""
+    corrected_up = compute_corrected_up_m(x_tar,y_tar,downward,ardu_image)
+    if corrected_up is not None:
+        downwards_str = f"{corrected_up:.2f} m"
+    else:
+        downwards_str = "N/A"
+    tx, ty = x_tar,y_tar
+    rx, ry = x_ref,y_ref
+    direction = "left" if tx < rx else "right"
+    lateral = compute_lateral_offset_m(oakd_image,x_tar,y_tar,x_ref,y_ref,depth_map)
+    if lateral is not None:
+        lateral_str = f"{abs(lateral):.2f} m to the {direction}"
+    else:
+        lateral_str = f"to the {direction}"
+    if not target_on_ground:
+        output = (
+            f"The target is {colour}, and is located {downwards_str} off the ground and {lateral_str} "
+            f"of the {ref_desc}."
+        )
+    else:
+        result=compute_cross_camera_offset()
+        if result is None:
+            output=("error generating description")
+        else:
+            x,y,z=result
+            output=(
+                f"The target is {colour}, and is located {x:.2f} meters forward, {z:.2f} meters down"
+                f" and {y:.2f} meters right from the reference"
+            ) 
 
 def load_db():
     with open(DB_PATH, "r", encoding="utf-8") as f:
@@ -380,7 +502,7 @@ def capture_image():
     except Exception as exc:
         return jsonify({"message":"failed to read image"}),500
     else:
-        oakd,arducam=handle_capture_success(
+        oakd_name,arducam_name=handle_capture_success(
         downwards_range,
         center_depth,
         pitch,
@@ -389,14 +511,12 @@ def capture_image():
         image2,
         depth_map,
         )   
-        buffer=io.BytesIO()
-        oakd.save(buffer,format="JPEG")
-        oakd_image=buffer.getvalue()
-        buffer=io.BytesIO()
-        arducam.save(buffer,format="JPEG")
-        arducam_image=buffer.getvalue()
-        arducam_string=base64.b64encode(arducam_image).decode()
-        oakd_string=base64.b64encode(oakd_image).decode()
+        with open(oakd_name,"rb") as f:
+            oakd_bytes=f.read()
+        with open(arducam_name,"rb") as f:
+            arducam_bytes=f.read()
+        arducam_string=base64.b64encode(arducam_bytes).decode()
+        oakd_string=base64.b64encode(oakd_bytes).decode()
 
         return jsonify({
             "roll":roll,
@@ -411,13 +531,27 @@ def capture_image():
 @app.route("/api/generate_output",methods=["POST"])
 def generate_output():
     payload = request.get_json(silent=True) or {}
-    ref_x=str(payload.get("reference_x","")).strip()
-    ref_y=str(payload.get("reference_y","")).strip()
-    targ_x=str(payload.get("target_x","")).strip()
-    targ_y=str(payload.get("target_y","")).strip()
+    x_ref=str(payload.get("reference_x","")).strip()
+    y_ref=str(payload.get("reference_y","")).strip()
+    x_tar=str(payload.get("target_x","")).strip()
+    y_tar=str(payload.get("target_y","")).strip()
     mode=str(payload.get("mode","")).strip()
     color=str(payload.get("color","")).strip()
     ref_desc=str(payload.get("ref_description","")).strip()
+    target_on_ground=str(payload.get("target_on_ground","")).strip()
+
+    if not x_ref or not y_ref or not x_tar or not y_tar or not mode or not color or not ref_desc or not target_on_ground:
+        return jsonify({"message":"invalid payload field"}),400
+    x_ref=int(x_ref)
+    y_ref=int(y_ref)
+    x_tar=int(x_tar)
+    y_tar=int(y_tar)
+    if target_on_ground.casefold()=="true":
+        target_on_ground=True
+    elif target_on_ground.casefold()=="false":
+        target_on_ground=False
+    else:
+        return jsonify({"message":"target_on_ground field invalid"}),400
     db=load_db()
     if not db["captures"]:
         return jsonify({"message":"Capture image first"}),400
@@ -427,12 +561,20 @@ def generate_output():
     ardufile_image=Image.open(latest["ardufile_name"])
     oakd_image=Image.open(latest["oakd_name"])
     depth_map=np.load(latest["depth_map_name"])
-
-    if not ref_x or not ref_y or not targ_x or not targ_y or not mode or not color or not ref_desc:
+    if not latest["downward_range"] or not latest["roll"] or not latest["pitch"]:
+        return jsonify({"message":"Invalid Image data"}),400
+    downward=latest["downward_range"]
+    roll=latest["roll"]
+    pitch=latest["pitch"]
+    if not x_ref or not y_ref or not x_tar or not y_tar or not mode:
         return jsonify({"message":"missing data"}),400
     if mode == "full_manual":
-        new_oakd_image=draw_manual_measurements(targ_x,targ_y,ref_x,ref_y,oakd_image,depth_map)
-
+        new_oakd_image=draw_manual_measurements(x_tar,y_tar,x_ref,y_ref,oakd_image,depth_map)
+    elif mode=="aided":
+        if not color or not ref_desc:
+            return jsonify({"message":"Missing color and or reference description"}),400
+        write_output(color,ref_desc,x_tar,y_tar,x_ref,y_ref,downward,ardufile_image,oakd_image,depth_map,target_on_ground)
+        
 
     
 
