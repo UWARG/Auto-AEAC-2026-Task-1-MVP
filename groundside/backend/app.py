@@ -56,7 +56,7 @@ CORS(app)
 
 DB_PATH = Path(__file__).with_name("data.json")
 capture_in_progress=threading.Lock()
-
+db_lock=threading.Lock()
 
 def recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
     """
@@ -167,7 +167,7 @@ def handle_capture_success(
 ) -> Tuple[Image.Image,Image.Image]:
     db=load_db()
     latest={
-        "downwards_range":downwards_range,
+        "downward_range":downwards_range,
         "pitch":pitch if pitch == pitch else None,
         "roll":roll if roll == roll else None
     }
@@ -203,7 +203,7 @@ def handle_capture_success(
     timestamp=time.strftime("%Y%m%d_%H%M%S")
     cur_path=Path.joinpath(Path(__file__).parent,"images")
     cur_path.mkdir(exist_ok=True)
-    depth_map_name=Path.joinpath(cur_path,f"depth_map_{timestamp}")
+    depth_map_name=Path.joinpath(cur_path,f"depth_map_{timestamp}.npy")
     arducam_name=Path.joinpath(cur_path,f"arducam_image_{timestamp}.jpg")
     oakd_name=Path.joinpath(cur_path,f"oakd_image_{timestamp}.jpg")
 
@@ -318,7 +318,7 @@ def draw_manual_measurements(x_target:float,
     return oakd_image
 
 
-def compute_corrected_up_m(x:int,y:int,downward:float,img:Image.Image) -> Optional[float]:
+def compute_corrected_up_m(x:int,y:int,downward:float,img:Image.Image,depth_map:np.ndarray) -> Optional[float]:
     """
     Corrected 'up' distance (m): downward rangefinder minus the vertical offset of the
     target from the drone, using the target's sampled OAK-D depth and the vertical FOV.
@@ -328,7 +328,7 @@ def compute_corrected_up_m(x:int,y:int,downward:float,img:Image.Image) -> Option
         return None
     d_down = downward
     tx, ty = x,y
-    target_depth = sample_depth_m(tx, ty)
+    target_depth = sample_depth_m(tx, ty,depth_map)
     if d_down is None or target_depth is None:
         return None
     if d_down != d_down or target_depth != target_depth:  # NaN
@@ -351,7 +351,7 @@ def compute_lateral_offset_m(img:Image.Image,x_tar:int,y_tar:int,x_ref:int,y_ref
     if (
         img is None
         or x_tar is None or y_tar is None
-        or x_ref or y_ref is None
+        or x_ref is None or y_ref is None
     ):
         return None
     W = img.width
@@ -371,12 +371,12 @@ def compute_lateral_offset_m(img:Image.Image,x_tar:int,y_tar:int,x_ref:int,y_ref
     return target_x_m - ref_x_m
 
 
-def compute_cross_camera_offset(x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,target_on_ground:bool,ardu_image:Image.Image,oakd_image:Image.Image) -> tuple[float,float,float]|None:
+def compute_cross_camera_offset(x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,target_on_ground:bool,ardu_image:Image.Image,oakd_image:Image.Image,depth_map:np.ndarray) -> tuple[float,float,float]|None:
     if not target_on_ground:
         return None
     tx, ty = x_tar,y_tar
     rx, ry = x_ref,y_ref
-    ref_depth=sample_depth_m(rx,ry)
+    ref_depth=sample_depth_m(rx,ry,depth_map)
     downward_range=downward
     if ref_depth is None or downward_range is None:
         return None
@@ -406,28 +406,26 @@ def compute_cross_camera_offset(x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward
     return (target_x-ref_x, #should always be negative
             target_y-ref_y,
             target_z-ref_z)
-def write_output(colour: str, ref_desc: str,x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,ardu_image:Image.Image,oakd_image:Image.Image,depth_map:np.ndarray,target_on_ground:bool) -> None:
+def write_output(colour: str, ref_desc: str,x_tar:int,y_tar:int,x_ref:int,y_ref:int,downward:float,ardu_image:Image.Image,oakd_image:Image.Image,depth_map:np.ndarray,target_on_ground:bool) -> str:
     """Build the output sentence and write it to the output text box."""
-    corrected_up = compute_corrected_up_m(x_tar,y_tar,downward,ardu_image)
-    if corrected_up is not None:
-        downwards_str = f"{corrected_up:.2f} m"
-    else:
-        downwards_str = "N/A"
-    tx, ty = x_tar,y_tar
-    rx, ry = x_ref,y_ref
-    direction = "left" if tx < rx else "right"
-    lateral = compute_lateral_offset_m(oakd_image,x_tar,y_tar,x_ref,y_ref,depth_map)
-    if lateral is not None:
-        lateral_str = f"{abs(lateral):.2f} m to the {direction}"
-    else:
-        lateral_str = f"to the {direction}"
-    if not target_on_ground:
+    if not target_on_ground:           
+        corrected_up = compute_corrected_up_m(x_tar,y_tar,downward,oakd_image,depth_map)
+        if corrected_up is not None:
+            downwards_str = f"{corrected_up:.2f} m"
+        else:
+            downwards_str = "N/A"
+        direction = "left" if x_tar < x_ref else "right"
+        lateral = compute_lateral_offset_m(oakd_image,x_tar,y_tar,x_ref,y_ref,depth_map)
+        if lateral is not None:
+            lateral_str = f"{abs(lateral):.2f} m to the {direction}"
+        else:
+            lateral_str = f"to the {direction}"
         output = (
             f"The target is {colour}, and is located {downwards_str} off the ground and {lateral_str} "
             f"of the {ref_desc}."
         )
     else:
-        result=compute_cross_camera_offset()
+        result=compute_cross_camera_offset(x_tar,y_tar,x_ref,y_ref,downward,target_on_ground,ardu_image,oakd_image,depth_map)
         if result is None:
             output=("error generating description")
         else:
@@ -436,15 +434,55 @@ def write_output(colour: str, ref_desc: str,x_tar:int,y_tar:int,x_ref:int,y_ref:
                 f"The target is {colour}, and is located {x:.2f} meters forward, {z:.2f} meters down"
                 f" and {y:.2f} meters right from the reference"
             ) 
+    return output
+
+
+
+def redraw_image_with_crosshairs(ardu_image:Image.Image,oakd_image:Image.Image,x_tar:int,y_tar:int,x_ref:int,y_ref:int,target_on_ground:bool) -> Optional[Tuple[Image.Image,Image.Image]]:
+    """Redraw the image from base, adding target (green) and reference (blue) crosshairs."""
+    if ardu_image is None or oakd_image is None:
+        return None
+    img = oakd_image.copy()
+    img2=ardu_image.copy()
+    draw = ImageDraw.Draw(img)
+    draw2=ImageDraw.Draw(img2)
+    s = CROSSHAIR_SIZE
+    if x_tar is not None and y_tar is not None and not target_on_ground:
+        tx, ty = x_tar,y_tar
+        draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+        draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+    elif x_tar is not None and y_tar is not None and target_on_ground:
+        tx,ty= x_tar,y_tar
+        draw2.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+        draw2.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
+    if x_ref is not None and y_ref is not None:
+        rx, ry = x_ref,y_ref
+        draw.line(
+            (rx - s, ry, rx + s, ry), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+        )
+        draw.line(
+            (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
+        )
+    return (img,img2)
 
 def load_db():
-    with open(DB_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    success=db_lock.acquire(blocking=False)
+    if success:
+        with open(DB_PATH, "r", encoding="utf-8") as f:
+            file=json.load(f)
+        db_lock.release()
+        return file
+    print("Can't load db while save in process")
 
 
 def save_db(data):
-    with open(DB_PATH, "w", encoding="utf-8") as f:
-        return json.dump(data, f, indent=3)
+    success=db_lock.acquire()
+    if success:
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=3)
+            db_lock.release()
+            return
+    print("can't save db while loading in process")
 
 
 @app.route("/api/ackme")
@@ -525,7 +563,7 @@ def capture_image():
             "center_depth":center_depth,
             "arducam_image":arducam_string,
             "oakd_image":oakd_string
-        })
+        }),200
     finally:
         capture_in_progress.release()
 @app.route("/api/generate_output",methods=["POST"])
@@ -539,13 +577,15 @@ def generate_output():
     color=str(payload.get("color","")).strip()
     ref_desc=str(payload.get("ref_description","")).strip()
     target_on_ground=str(payload.get("target_on_ground","")).strip()
-
     if not x_ref or not y_ref or not x_tar or not y_tar or not mode or not color or not ref_desc or not target_on_ground:
         return jsonify({"message":"invalid payload field"}),400
-    x_ref=int(x_ref)
-    y_ref=int(y_ref)
-    x_tar=int(x_tar)
-    y_tar=int(y_tar)
+    try:
+        x_ref=int(x_ref)
+        y_ref=int(y_ref)
+        x_tar=int(x_tar)
+        y_tar=int(y_tar)
+    except ValueError as e:
+        return jsonify({"message":f"{e}"}),400
     if target_on_ground.casefold()=="true":
         target_on_ground=True
     elif target_on_ground.casefold()=="false":
@@ -564,21 +604,39 @@ def generate_output():
     if not latest["downward_range"] or not latest["roll"] or not latest["pitch"]:
         return jsonify({"message":"Invalid Image data"}),400
     downward=latest["downward_range"]
-    roll=latest["roll"]
-    pitch=latest["pitch"]
-    if not x_ref or not y_ref or not x_tar or not y_tar or not mode:
-        return jsonify({"message":"missing data"}),400
+
+    #need 0 < x_ref,y_ref,x_tar,y_tar < image.height/width and downward_range > 0 validation? 
+
     if mode == "full_manual":
         new_oakd_image=draw_manual_measurements(x_tar,y_tar,x_ref,y_ref,oakd_image,depth_map)
+        buffer=io.BytesIO()
+        new_oakd_image.save(buffer,format="JPEG")
+        oak_d=base64.b64encode(buffer.getvalue()).decode()
+        with open(latest["ardufile_name"],"rb") as f:
+            arducam_img=f.read()
+        return jsonify({
+            "oakd_image":oak_d,
+            "ardu_image":base64.b64encode(arducam_img).decode(),
+            "output":None
+        }),200
     elif mode=="aided":
         if not color or not ref_desc:
             return jsonify({"message":"Missing color and or reference description"}),400
-        write_output(color,ref_desc,x_tar,y_tar,x_ref,y_ref,downward,ardufile_image,oakd_image,depth_map,target_on_ground)
-        
-
-    
-
-
-
+        output=write_output(color,ref_desc,x_tar,y_tar,x_ref,y_ref,downward,ardufile_image,oakd_image,depth_map,target_on_ground)
+        try:
+            new_oakd_image,new_ardu_img=redraw_image_with_crosshairs(ardufile_image,oakd_image,x_tar,y_tar,x_ref,y_ref,target_on_ground)
+        except Exception as e:
+            return jsonify({"message":f"{e}"})
+        buffer=io.BytesIO()
+        new_oakd_image.save(buffer,format="JPEG")
+        oak_d=base64.b64encode(buffer.getvalue()).decode()
+        buffer=io.BytesIO()
+        new_ardu_img.save(buffer,format="JPEG")
+        ardu=base64.b64encode(buffer.getvalue()).decode()
+        return jsonify({"output":output,
+                        "oak_d_image":oak_d,
+                        "ardu_image":ardu
+                        }),200
+    return jsonify({"message":"invalid mode"}),400
 if __name__ == "__main__":
     app.run(debug=True)
