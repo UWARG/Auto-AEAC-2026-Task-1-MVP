@@ -16,7 +16,16 @@ from pathlib import Path
 import base64
 import threading
 
+"""
+DB Schema
 
+ardufile_name:str       Path of ardufile image
+oakd_name:str           Path of oakd image
+time:str                Timestamp of image taken
+depth_map_name:str      Path of depth map npy file
+desc:str                Generated description of target
+downward_range:float    Distance to ground
+"""
 # Click mode for "Generate output" flow
 SELECT_TARGET = "target"
 SELECT_REFERENCE = "reference"
@@ -166,18 +175,13 @@ def handle_capture_success(
     depth_map: np.ndarray,
 ) -> Tuple[Image.Image,Image.Image]:
     db=load_db()
-    latest={
-        "downward_range":downwards_range,
-        "pitch":pitch if pitch == pitch else None,
-        "roll":roll if roll == roll else None
-    }
-
+    roll=roll if roll==roll else None
 
     # Rotate image to remove roll before any geometric calculations.
     display_image = image.copy()
     display_image2=image2.copy()
     rotated_depth_map = depth_map.copy()
-    if latest["roll"] is not None:
+    if roll is not None:
         # Negative roll de-rotates the image so the horizon appears level.
         roll_deg = math.degrees(roll)
         display_image = display_image.rotate(
@@ -212,11 +216,13 @@ def handle_capture_success(
     np.save(depth_map_name,rotated_depth_map)
 
     #get image in bytes
-
+    latest={}
+    latest["downward_range"]=downwards_range
     latest["ardufile_name"]=str(arducam_name)
     latest["oakd_name"]=str(oakd_name)
     latest["time"]=timestamp
     latest["depth_map_name"]=str(depth_map_name)
+    latest["desc"]=None
     db["captures"].append(latest)
     save_db(db)
     return oakd_name,arducam_name
@@ -286,10 +292,10 @@ def draw_manual_measurements(x_target:float,
                              x_ref:float,
                              y_ref:float,
                              oakd_image:Image.Image,
-                             depth_map:np.ndarray) -> Image.Image:
+                             depth_map:np.ndarray) -> Optional[Image.Image]:
     """Draw both points and the distance up/sideways between them on the image."""
     if oakd_image is None:
-        return
+        return None
     delta_up, delta_sideways = compute_delta_up_sideways_m(x_target,y_target,x_ref,y_ref,oakd_image,depth_map)
     draw = ImageDraw.Draw(oakd_image)
     s = CROSSHAIR_SIZE
@@ -466,23 +472,19 @@ def redraw_image_with_crosshairs(ardu_image:Image.Image,oakd_image:Image.Image,x
     return (img,img2)
 
 def load_db():
-    success=db_lock.acquire(blocking=False)
-    if success:
-        with open(DB_PATH, "r", encoding="utf-8") as f:
-            file=json.load(f)
-        db_lock.release()
-        return file
-    print("Can't load db while save in process")
+    db_lock.acquire()
+    with open(DB_PATH, "r", encoding="utf-8") as f:
+        file=json.load(f)
+    db_lock.release()
+    return file
 
 
 def save_db(data):
-    success=db_lock.acquire()
-    if success:
-        with open(DB_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=3)
-            db_lock.release()
-            return
-    print("can't save db while loading in process")
+    db_lock.acquire()
+    with open(DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=3)
+    db_lock.release()
+
 
 
 @app.route("/api/ackme")
@@ -494,32 +496,6 @@ def ack():
 def list_captures():
     db = load_db()
     return jsonify(db.get("captures", []))
-
-
-@app.route("/api/captures", methods=["POST"])
-def create_capture():
-    payload = request.get_json(silent=True) or {}
-    filename = str(payload.get("filename", "")).strip()
-    desc = str(payload.get("desc", "")).strip()
-    time_value = str(payload.get("time", "")).strip()
-
-    if not filename or not desc:
-        return jsonify({"message": "filename and desc are required"}), 400
-
-    if not time_value:
-        time_value = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-    capture = {
-        "time": time_value,
-        "filename": filename,
-        "desc": desc,
-    }
-
-    db = load_db()
-    db.setdefault("captures", []).append(capture)
-    save_db(db)
-
-    return jsonify(capture), 201
 
 
 @app.route("/api/db_reset", methods=["POST"])
@@ -537,8 +513,8 @@ def capture_image():
         downwards_range, center_depth, pitch, roll, image,image2, depth_map = (
         request_image()
     )
-    except Exception as exc:
-        return jsonify({"message":"failed to read image"}),500
+    except Exception as e:
+        return jsonify({"message":f"{e}"}),500
     else:
         oakd_name,arducam_name=handle_capture_success(
         downwards_range,
@@ -577,7 +553,7 @@ def generate_output():
     color=str(payload.get("color","")).strip()
     ref_desc=str(payload.get("ref_description","")).strip()
     target_on_ground=str(payload.get("target_on_ground","")).strip()
-    if not x_ref or not y_ref or not x_tar or not y_tar or not mode or not color or not ref_desc or not target_on_ground:
+    if not x_ref or not y_ref or not x_tar or not y_tar or not mode or not target_on_ground:
         return jsonify({"message":"invalid payload field"}),400
     try:
         x_ref=int(x_ref)
@@ -601,7 +577,7 @@ def generate_output():
     ardufile_image=Image.open(latest["ardufile_name"])
     oakd_image=Image.open(latest["oakd_name"])
     depth_map=np.load(latest["depth_map_name"])
-    if not latest["downward_range"] or not latest["roll"] or not latest["pitch"]:
+    if not latest["downward_range"]:
         return jsonify({"message":"Invalid Image data"}),400
     downward=latest["downward_range"]
 
@@ -609,6 +585,8 @@ def generate_output():
 
     if mode == "full_manual":
         new_oakd_image=draw_manual_measurements(x_tar,y_tar,x_ref,y_ref,oakd_image,depth_map)
+        if new_oakd_image is None:
+            return jsonify({"message":"could not draw measurement"}),400
         buffer=io.BytesIO()
         new_oakd_image.save(buffer,format="JPEG")
         oak_d=base64.b64encode(buffer.getvalue()).decode()
@@ -626,13 +604,15 @@ def generate_output():
         try:
             new_oakd_image,new_ardu_img=redraw_image_with_crosshairs(ardufile_image,oakd_image,x_tar,y_tar,x_ref,y_ref,target_on_ground)
         except Exception as e:
-            return jsonify({"message":f"{e}"})
+            return jsonify({"message":f"{e}"}),400
         buffer=io.BytesIO()
         new_oakd_image.save(buffer,format="JPEG")
         oak_d=base64.b64encode(buffer.getvalue()).decode()
         buffer=io.BytesIO()
         new_ardu_img.save(buffer,format="JPEG")
         ardu=base64.b64encode(buffer.getvalue()).decode()
+        latest["desc"]=output
+        save_db(db)
         return jsonify({"output":output,
                         "oak_d_image":oak_d,
                         "ardu_image":ardu
