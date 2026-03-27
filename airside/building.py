@@ -34,9 +34,9 @@ class Building:
     def record_height(self, height: float):
         """Record building height in meters."""
         self.height = height
-        self.corners = [
-            Coordinate(c.lat, c.lon, height) if c else None for c in self.corners
-        ]
+        for coord in self.corners:
+            if coord is not None:
+                coord.alt = height
 
     def in_bounds(self, point: Coordinate) -> bool:
         """Check if a point is within the building's rectangular bounds."""

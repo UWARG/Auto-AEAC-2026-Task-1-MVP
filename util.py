@@ -11,7 +11,7 @@ UINT16_MAX = 65535
 
 # MAVLink communication constants
 AIRSIDE_COMPONENT_ID = 191
-MAVLINK_TCP_HOST = '127.0.0.1'
+MAVLINK_TCP_HOST = "127.0.0.1"
 MAVLINK_TCP_PORT = 14550
 MAVLINK_RECEIVE_TIMEOUT_SEC = 1
 
@@ -87,7 +87,13 @@ class Colour:
 
 
 class Colours(Enum):
-    RED = Colour("Red", (0, 100, 100), (10, 255, 255))
-    GREEN = Colour("Green", (36, 25, 25), (70, 255, 255))
-    BLUE = Colour("Blue", (100, 100, 100), (130, 255, 255))
-    WHITE = Colour("White", (0, 0, 200), (180, 255, 255))
+    # HSV ranges tightened for more precise detection
+    # H (Hue): 0-180, S (Saturation): 0-255, V (Value): 0-255
+    RED = Colour("Red", (0, 120, 120), (10, 255, 255))
+    RED2 = Colour("Red", (168, 120, 120), (180, 255, 255))
+    GREEN = Colour("Green", (40, 120, 120), (80, 255, 255))
+    BLUE = Colour("Blue", (90, 120, 120), (120, 255, 255))
+    YELLOW = Colour("Yellow", (26, 120, 120), (36, 255, 255))
+    WHITE = Colour("White", (0, 0, 225), (255, 30, 255))
+    BLACK = Colour("Black", (0, 0, 0), (255, 255, 30))
+    # WHITE = Colour("White", (0, 0, 200), (180, 255, 255))

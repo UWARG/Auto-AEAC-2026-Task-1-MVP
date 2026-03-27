@@ -28,6 +28,11 @@ class Building:
             return self.corners[0].alt
         return 0.0
 
+    def add_corner(self, coord: Coordinate):
+        if len(self.corners) >= 4:
+            self.corners.clear()
+        self.corners.append(coord)
+
     def generate_target_description(self, target: Coordinate, colour: str) -> str:
         """
         Generate human-readable description of target location.
