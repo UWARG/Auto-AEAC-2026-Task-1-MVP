@@ -52,9 +52,9 @@ function Start-LoggedProcess {
   $startInfo.RedirectStandardError = $true
   $startInfo.CreateNoWindow = $true
 
-  foreach ($argument in $Arguments) {
-    [void]$startInfo.ArgumentList.Add($argument)
-  }
+  $startInfo.Arguments = ($Arguments | ForEach-Object {
+    if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+  }) -join ' '
 
   $process = [System.Diagnostics.Process]::new()
   $process.StartInfo = $startInfo
@@ -106,7 +106,7 @@ Write-Host "[info] press Ctrl+C to stop both services" -ForegroundColor Yellow
 
 $processes = @(
   (Start-LoggedProcess -Name "backend" -Color "Cyan" -FilePath $python -Arguments @("app.py") -WorkingDirectory $backendDir),
-  (Start-LoggedProcess -Name "frontend" -Color "Green" -FilePath "pnpm.cmd" -Arguments @("dev") -WorkingDirectory $frontendDir)
+  (Start-LoggedProcess -Name "frontend" -Color "Green" -FilePath "cmd.exe" -Arguments @("/c", "pnpm", "dev") -WorkingDirectory $frontendDir)
 )
 
 try {
