@@ -2,7 +2,6 @@ import io
 import json
 from datetime import datetime, timezone
 import math
-from pathlib import Path
 import socket
 import struct
 from typing import Optional, Tuple
@@ -15,6 +14,7 @@ import time
 from pathlib import Path
 import base64
 import threading
+import uuid
 
 """
 DB Schema
@@ -25,6 +25,7 @@ time:str                Timestamp of image taken
 depth_map_name:str      Path of depth map npy file
 desc:str                Generated description of target
 downward_range:float    Distance to ground
+direction:str           "F" if target is on forward cam(wall) or "D" if target is on downward cam(ground)
 """
 # Click mode for "Generate output" flow
 SELECT_TARGET = "target"
@@ -167,13 +168,11 @@ def rotate_depth_map(depth_map: np.ndarray, angle_deg: float) -> np.ndarray:
 
 def handle_capture_success(
     downwards_range: float,
-    center_depth: float,
-    pitch: float,
     roll: float,
     image: Image.Image,
     image2: Image.Image,
     depth_map: np.ndarray,
-) -> Tuple[Image.Image,Image.Image]:
+) -> Tuple[str,str,str]:
     db=load_db()
     roll=roll if roll==roll else None
 
@@ -223,9 +222,11 @@ def handle_capture_success(
     latest["time"]=timestamp
     latest["depth_map_name"]=str(depth_map_name)
     latest["desc"]=None
-    db["captures"].append(latest)
+    latest["direction"]=None
+    pk=str(uuid.uuid4())
+    db["captures"][pk]=latest
     save_db(db)
-    return oakd_name,arducam_name
+    return oakd_name,arducam_name,pk
 
 
 def sample_depth_m(x: int, y: int,depth_map:np.ndarray, radius: int = 4) -> Optional[float]:
@@ -472,20 +473,19 @@ def redraw_image_with_crosshairs(ardu_image:Image.Image,oakd_image:Image.Image,x
     return (img,img2)
 
 def load_db():
-    db_lock.acquire()
-    with open(DB_PATH, "r", encoding="utf-8") as f:
-        file=json.load(f)
-    db_lock.release()
+    with db_lock:
+        try:
+            with open(DB_PATH, "r", encoding="utf-8") as f:
+                file=json.load(f)
+        except Exception:
+            return {"captures":{}}
     return file
 
 
 def save_db(data):
-    db_lock.acquire()
-    with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=3)
-    db_lock.release()
-
-
+    with db_lock:
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=3)
 
 @app.route("/api/ackme")
 def ack():
@@ -495,7 +495,7 @@ def ack():
 @app.route("/api/captures", methods=["GET"])
 def list_captures():
     db = load_db()
-    return jsonify(db.get("captures", []))
+    return jsonify(db.get("captures", {}))
 
 
 @app.route("/api/db_reset", methods=["POST"])
@@ -510,16 +510,9 @@ def capture_image():
     if not capture_in_progress.acquire(blocking=False):
         return jsonify({"message":"image being captured"}),400
     try:
-        downwards_range, center_depth, pitch, roll, image,image2, depth_map = (
-        request_image()
-    )
-    except Exception as e:
-        return jsonify({"message":f"{e}"}),500
-    else:
-        oakd_name,arducam_name=handle_capture_success(
+        downwards_range, center_depth, pitch, roll, image,image2, depth_map = request_image()
+        oakd_name,arducam_name,pk=handle_capture_success(
         downwards_range,
-        center_depth,
-        pitch,
         roll,
         image,
         image2,
@@ -531,15 +524,19 @@ def capture_image():
             arducam_bytes=f.read()
         arducam_string=base64.b64encode(arducam_bytes).decode()
         oakd_string=base64.b64encode(oakd_bytes).decode()
-
+        def check_nan(var):
+            return None if (var!=var) else var
         return jsonify({
-            "roll":roll,
-            "pitch":pitch,
-            "downward_range":downwards_range,
-            "center_depth":center_depth,
+            "roll":check_nan(roll),
+            "pitch":check_nan(pitch),
+            "downward_range":check_nan(downwards_range),
+            "center_depth":check_nan(center_depth),
             "arducam_image":arducam_string,
-            "oakd_image":oakd_string
+            "oakd_image":oakd_string,
+            "pk":pk
         }),200
+    except Exception as e:
+        return jsonify({"message":f"{e}"}),500
     finally:
         capture_in_progress.release()
 @app.route("/api/generate_output",methods=["POST"])
@@ -571,19 +568,22 @@ def generate_output():
     db=load_db()
     if not db["captures"]:
         return jsonify({"message":"Capture image first"}),400
-    latest=db["captures"][-1]
+    last_key=next(reversed(db["captures"]))
+    latest=db["captures"][last_key]
     if not latest["ardufile_name"] or not latest["oakd_name"] or not latest["time"] or not latest["depth_map_name"]:
         return jsonify({"message":"Invalid Image data"}),400
     ardufile_image=Image.open(latest["ardufile_name"])
     oakd_image=Image.open(latest["oakd_name"])
     depth_map=np.load(latest["depth_map_name"])
-    if not latest["downward_range"]:
+    if latest["downward_range"] is None:
         return jsonify({"message":"Invalid Image data"}),400
     downward=latest["downward_range"]
 
     #need 0 < x_ref,y_ref,x_tar,y_tar < image.height/width and downward_range > 0 validation? 
-
+    latest["direction"]="D" if target_on_ground else "F"
     if mode == "full_manual":
+        if target_on_ground:
+            return jsonify({"message":"cannot do cross-camera full manual"}),400
         new_oakd_image=draw_manual_measurements(x_tar,y_tar,x_ref,y_ref,oakd_image,depth_map)
         if new_oakd_image is None:
             return jsonify({"message":"could not draw measurement"}),400
@@ -592,6 +592,7 @@ def generate_output():
         oak_d=base64.b64encode(buffer.getvalue()).decode()
         with open(latest["ardufile_name"],"rb") as f:
             arducam_img=f.read()
+        save_db(db)
         return jsonify({
             "oakd_image":oak_d,
             "ardu_image":base64.b64encode(arducam_img).decode(),
@@ -604,7 +605,9 @@ def generate_output():
         try:
             new_oakd_image,new_ardu_img=redraw_image_with_crosshairs(ardufile_image,oakd_image,x_tar,y_tar,x_ref,y_ref,target_on_ground)
         except Exception as e:
-            return jsonify({"message":f"{e}"}),400
+            return jsonify({"message":f"Could not draw crosshairs"}),400
+        # do we want to write new_oakd_image and new_ardu_img back into the db? Would probably be ineffecient
+        # for every pair of captures to have 4 file writes to db. Unannotated image should suffice...? 
         buffer=io.BytesIO()
         new_oakd_image.save(buffer,format="JPEG")
         oak_d=base64.b64encode(buffer.getvalue()).decode()
@@ -613,10 +616,51 @@ def generate_output():
         ardu=base64.b64encode(buffer.getvalue()).decode()
         latest["desc"]=output
         save_db(db)
-        return jsonify({"output":output,
-                        "oak_d_image":oak_d,
+        return jsonify({"desc":output,
+                        "oakd_image":oak_d,
                         "ardu_image":ardu
                         }),200
     return jsonify({"message":"invalid mode"}),400
+
+@app.route("/api/save_by_id",methods=["PATCH"])
+def save_by_id():
+    db=load_db()
+    try:
+        payload=request.get_json(silent=True) or {}
+        pk=(str(payload.get("pk","")).strip())
+        if pk=="":
+            return jsonify({"message":"recieved empty pk"}),400
+        entry=db["captures"].get(pk,{})
+        if not entry:
+            return jsonify({"message":f"cannot find pk{pk}"}),400
+        description=entry["desc"]
+        time=entry["time"]
+        if entry["desc"] is None:
+            return jsonify({"message":"generate image before saving"}),400
+        if entry["direction"]=="D":
+            file_name=entry["ardufile_name"]
+        elif entry["direction"]=="F":
+            file_name=entry["oakd_name"]
+        else:
+            return jsonify({"message": f"invalid direction '{entry['direction']}'"}), 400
+        path=Path.joinpath(Path(__file__).parent,"descriptions.txt")
+        with open(path,"a",encoding="utf-8") as f:
+            f.write(f"filename:{file_name}, description:{description}, time:{time}\n")
+    except Exception as e:
+        return jsonify({"message":f"{e}"}),400
+    return jsonify({"message":f"successfully saved {description}"}),200
+
+@app.route("/api/delete_by_id",methods=["DELETE"])
+def delete_by_id():
+    db=load_db()
+    try:
+        payload=request.get_json(silent=True) or {}
+        pk=str(payload.get("pk","")).strip()
+        popped=db["captures"].pop(pk)
+    except Exception as e:
+        return jsonify({"message":f"invalid pk"}),400
+    save_db(db)
+    return jsonify({"message":f"successfully popped {popped}"}),200
+        
 if __name__ == "__main__":
     app.run(debug=True)
