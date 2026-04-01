@@ -39,22 +39,22 @@ export function CaptureHistory({ captures, selectedId, onSelect, isLoading, sele
                   }`}
                 >
                   <div className="flex flex-col gap-0.5 text-sm min-w-0">
-                    <span className="text-zinc-400 text-xs">
+                    {/* <span className="text-zinc-400 text-xs">
                       {new Date(capture.time).toLocaleString()}
-                    </span>
+                    </span> */}
                     <span>
                       <span className="font-semibold">Colour:</span>{" "}
                       {capture.colour ?? "N/A"}
                     </span>
                     <span>
-                      <span className="font-semibold">Direction:</span>{" "}
-                      {capture.direction ?? "N/A"}
-                    </span>
-                    <span>
                       <span className="font-semibold">Reference:</span>{" "}
                       {capture.reference ?? "N/A"}
                     </span>
-                    {(capture.green || capture.red) && (
+                    <span>
+                      <span className="font-semibold">Direction:</span>{" "}
+                      {capture.direction ?? "N/A"}
+                    </span>
+                    {/* {(capture.green || capture.red) && (
                       <span className="text-xs font-mono mt-0.5">
                         {capture.green && (
                           <span className="text-green-600">
@@ -68,7 +68,7 @@ export function CaptureHistory({ captures, selectedId, onSelect, isLoading, sele
                           </span>
                         )}
                       </span>
-                    )}
+                    )} */}
                     <span className="text-zinc-400 italic text-xs mt-1">
                       {capture.desc ?? "No description provided"}
                     </span>
