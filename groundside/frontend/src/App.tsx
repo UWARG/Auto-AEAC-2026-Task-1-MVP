@@ -375,7 +375,9 @@ function App() {
 
   async function handleDelete(id: string) {
     try {
-      await apiDeleteById(id);
+      if (!id.startsWith("demo-")) {
+        await apiDeleteById(id);
+      }
       setCaptures((c) => {
         const next = c.filter((cap) => cap.id !== id);
         if (selectedId === id) setSelectedId(next[0]?.id ?? null);
