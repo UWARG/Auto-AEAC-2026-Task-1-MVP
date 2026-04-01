@@ -8,9 +8,10 @@ type Props = {
   isLoading: boolean;
   selectedCapture: Capture | null;
   onDelete: (id: string) => void;
+  onEdit: (id: string) => void;
 };
 
-export function CaptureHistory({ captures, selectedId, onSelect, isLoading, selectedCapture, onDelete }: Props) {
+export function CaptureHistory({ captures, selectedId, onSelect, isLoading, selectedCapture, onDelete, onEdit }: Props) {
   return (
     <section className="w-full">
       <h2 className="text-base font-semibold text-zinc-900 mb-4">Capture History</h2>
@@ -75,20 +76,6 @@ export function CaptureHistory({ captures, selectedId, onSelect, isLoading, sele
 
                   {/* Action buttons */}
                   <div className="flex flex-col gap-1 shrink-0">
-                    <div className="w-6 h-6 rounded bg-zinc-800 flex items-center justify-center">
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        className="h-3.5 w-3.5 text-white"
-                        viewBox="0 0 20 20"
-                        fill="currentColor"
-                      >
-                        <path
-                          fillRule="evenodd"
-                          d="M16.707 5.293a1 1 0 0 1 0 1.414l-8 8a1 1 0 0 1-1.414 0l-4-4a1 1 0 0 1 1.414-1.414L8 12.586l7.293-7.293a1 1 0 0 1 1.414 0Z"
-                          clipRule="evenodd"
-                        />
-                      </svg>
-                    </div>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -147,7 +134,11 @@ export function CaptureHistory({ captures, selectedId, onSelect, isLoading, sele
                     overflow: "hidden",
                   }}
                 >
-                  <div style={{ position: "relative", display: "inline-block", maxWidth: "100%", maxHeight: "100%" }}>
+                  <div
+                    style={{ position: "relative", display: "inline-block", maxWidth: "100%", maxHeight: "100%", cursor: "pointer" }}
+                    onClick={() => onEdit(selectedCapture.id)}
+                    title="Click to re-annotate"
+                  >
                     <img
                       src={selectedCapture.imageUrl ?? "/warg.jpg"}
                       alt="Capture"

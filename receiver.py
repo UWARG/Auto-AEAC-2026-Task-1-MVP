@@ -35,8 +35,8 @@ SOCKET_TIMEOUT = 10.0  # seconds
 CAMERA_HFOV_RAD = math.radians(80)
 CAMERA_VFOV_RAD = math.radians(55)
 
-ARDU_CAMERA_VFOV_RAD=math.radians(55)
-ARDU_CAMERA_HFOV_RAD=math.radians(80)
+ARDU_CAMERA_VFOV_RAD = math.radians(55)
+ARDU_CAMERA_HFOV_RAD = math.radians(80)
 
 
 # Fisheye correction (only near the edges). Correction = 1 + this * (angle / edge_angle)^2.
@@ -54,13 +54,13 @@ class ReceiverApp:
             root, text="Capture image", command=self.on_capture_clicked
         )
         self.button.pack(pady=8)
-        frame=tk.Frame(root)
+        frame = tk.Frame(root)
         frame.pack(pady=8)
         self.image_label = tk.Label(frame)
-        self.image_label.pack(padx=8, pady=8,side=tk.LEFT)
+        self.image_label.pack(padx=8, pady=8, side=tk.LEFT)
 
-        self.ardu_image_label=tk.Label(frame)
-        self.ardu_image_label.pack(padx=8,pady=8,side=tk.RIGHT)
+        self.ardu_image_label = tk.Label(frame)
+        self.ardu_image_label.pack(padx=8, pady=8, side=tk.RIGHT)
 
         self.range_label = tk.Label(root, text="Downwards: N/A    Depth(center): N/A")
         self.range_label.pack(pady=(0, 2))
@@ -153,7 +153,7 @@ class ReceiverApp:
         # Base display image (with center dot only) for redrawing with crosshairs
         self._base_display_image: Optional[Image.Image] = None
         self._base_depth_map: Optional[np.ndarray] = None
-        self._base_display_image_arducam:Optional[Image.Image] = None
+        self._base_display_image_arducam: Optional[Image.Image] = None
 
         # Last telemetry from capture (for generate output)
         self._last_downwards: Optional[float] = None
@@ -169,7 +169,7 @@ class ReceiverApp:
         # Protect against multiple concurrent capture threads
         self._capture_lock = threading.Lock()
 
-        self.target_on_ground=False
+        self.target_on_ground = False
 
     def on_capture_clicked(self) -> None:
         if not self._capture_lock.acquire(blocking=False):
@@ -184,7 +184,7 @@ class ReceiverApp:
 
     def _capture_worker(self) -> None:
         try:
-            downwards_range, center_depth, pitch, roll, image,image2, depth_map = (
+            downwards_range, center_depth, pitch, roll, image, image2, depth_map = (
                 self.request_image()
             )
         except Exception as exc:
@@ -219,16 +219,16 @@ class ReceiverApp:
         if self._base_display_image is None or self._base_display_image_arducam is None:
             return
         img = self._base_display_image.copy()
-        img2=self._base_display_image_arducam.copy()
+        img2 = self._base_display_image_arducam.copy()
         draw = ImageDraw.Draw(img)
-        draw2=ImageDraw.Draw(img2)
+        draw2 = ImageDraw.Draw(img2)
         s = CROSSHAIR_SIZE
         if self._target_xy is not None and not self.target_on_ground:
             tx, ty = self._target_xy
             draw.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
             draw.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
         elif self._target_xy is not None and self.target_on_ground:
-            tx,ty=self._target_xy
+            tx, ty = self._target_xy
             draw2.line((tx - s, ty, tx + s, ty), fill=TARGET_CROSSHAIR_COLOUR, width=2)
             draw2.line((tx, ty - s, tx, ty + s), fill=TARGET_CROSSHAIR_COLOUR, width=2)
         if self._ref_xy is not None:
@@ -240,7 +240,7 @@ class ReceiverApp:
                 (rx, ry - s, rx, ry + s), fill=REFERENCE_CROSSHAIR_COLOUR, width=2
             )
         self._current_photo = ImageTk.PhotoImage(image=img)
-        self._current_ardu_photo=ImageTk.PhotoImage(image=img2)
+        self._current_ardu_photo = ImageTk.PhotoImage(image=img2)
         self.image_label.config(image=self._current_photo)
         self.ardu_image_label.config(image=self._current_ardu_photo)
 
@@ -256,7 +256,7 @@ class ReceiverApp:
         self._target_xy = None
         self._ref_xy = None
         self._click_mode = None
-        self.target_on_ground=False
+        self.target_on_ground = False
         try:
             self.image_label.unbind("<Button-1>")
         except tk.TclError:
@@ -287,9 +287,9 @@ class ReceiverApp:
                 )
                 return
             self._write_output(colour, ref_desc)
-            self.target_on_ground=False
+            self.target_on_ground = False
             return
-        self.target_on_ground=False
+        self.target_on_ground = False
         self._click_mode = SELECT_TARGET
         self._target_xy = None
         self._ref_xy = None
@@ -298,7 +298,7 @@ class ReceiverApp:
         )
         self._redraw_image_with_crosshairs()
         self.image_label.bind("<Button-1>", self._on_image_click)
-        self.ardu_image_label.bind("<Button-1>",self._on_image_click)
+        self.ardu_image_label.bind("<Button-1>", self._on_image_click)
 
     def _start_full_manual_flow(self) -> None:
         """Start two-point selection for full manual; distances drawn on image."""
@@ -372,46 +372,46 @@ class ReceiverApp:
         delta_h = target_depth * math.tan(angle_v)
         return d_down - delta_h
 
-
-    def _compute_cross_camera_offset(self) -> tuple[float,float,float]|None:
+    def _compute_cross_camera_offset(self) -> tuple[float, float, float] | None:
         if not self.target_on_ground:
             return None
         tx, ty = self._target_xy
         rx, ry = self._ref_xy
-        ref_depth=self._sample_depth_m(rx,ry)
-        downward_range=self._last_downwards
+        ref_depth = self._sample_depth_m(rx, ry)
+        downward_range = self._last_downwards
         if ref_depth is None or downward_range is None:
             return None
-        half_hfov=CAMERA_HFOV_RAD/2
-        half_vfov=CAMERA_VFOV_RAD/2
-        W=self._base_display_image.width
-        H=self._base_display_image.height
-        a_horizontal=((rx-W/2)/(W/2))*half_hfov
-        a_vertical=((ry-H/2)/(H/2))*half_vfov
-        ref_x=ref_depth
-        ref_y=ref_depth*math.tan(a_horizontal)
-        ref_z=ref_depth*math.tan(a_vertical)
-        #for arducam ground target
-        W=self._base_display_image_arducam.width
-        H=self._base_display_image_arducam.height
-        half_hfov=ARDU_CAMERA_HFOV_RAD/2
-        half_vfov=ARDU_CAMERA_VFOV_RAD/2
-        a_horizontal=((tx-W/2)/(W/2))*half_hfov
-        a_vertical=((H/2-ty)/(H/2))*half_vfov #flip h/2 and ty signs for oakd to be facing in positive x dir
-        target_x=downward_range*math.tan(a_vertical) 
-        target_y=downward_range*math.tan(a_horizontal)
-        target_z=downward_range
-        #positive coordinates:
-        #oak-d image right
-        #down
-        #arducam up
-        return (target_x-ref_x, #should always be negative
-                target_y-ref_y,
-                target_z-ref_z)
+        half_hfov = CAMERA_HFOV_RAD / 2
+        half_vfov = CAMERA_VFOV_RAD / 2
+        W = self._base_display_image.width
+        H = self._base_display_image.height
+        a_horizontal = ((rx - W / 2) / (W / 2)) * half_hfov
+        a_vertical = ((ry - H / 2) / (H / 2)) * half_vfov
+        ref_x = ref_depth
+        ref_y = ref_depth * math.tan(a_horizontal)
+        ref_z = ref_depth * math.tan(a_vertical)
+        # for arducam ground target
+        W = self._base_display_image_arducam.width
+        H = self._base_display_image_arducam.height
+        half_hfov = ARDU_CAMERA_HFOV_RAD / 2
+        half_vfov = ARDU_CAMERA_VFOV_RAD / 2
+        a_horizontal = ((tx - W / 2) / (W / 2)) * half_hfov
+        a_vertical = (
+            (H / 2 - ty) / (H / 2)
+        ) * half_vfov  # flip h/2 and ty signs for oakd to be facing in positive x dir
+        target_x = downward_range * math.tan(a_vertical)
+        target_y = downward_range * math.tan(a_horizontal)
+        target_z = downward_range
+        # positive coordinates:
+        # oak-d image right
+        # down
+        # arducam up
+        return (
+            target_x - ref_x,  # should always be negative
+            target_y - ref_y,
+            target_z - ref_z,
+        )
 
-
-        
-        
     def _compute_lateral_offset_m(self) -> Optional[float]:
         """
         Horizontal distance (m) of the target from the reference, using each point's
@@ -536,15 +536,15 @@ class ReceiverApp:
                 f"of the {ref_desc}."
             )
         else:
-            result=self._compute_cross_camera_offset()
+            result = self._compute_cross_camera_offset()
             if result is None:
-                output=("error generating description")
+                output = "error generating description"
             else:
-                x,y,z=result
-                output=(
+                x, y, z = result
+                output = (
                     f"The target is {colour}, and is located {x:.2f} meters forward, {z:.2f} meters down"
                     f" and {y:.2f} meters right from the reference"
-                ) 
+                )
         self._output_text.config(state=tk.NORMAL)
         self._output_text.delete("1.0", tk.END)
         self._output_text.insert("1.0", output)
@@ -558,10 +558,10 @@ class ReceiverApp:
                 self.ardu_image_label.unbind("<Button-1>")
             except:
                 pass
-            if event.widget==self.ardu_image_label:
-                self.target_on_ground=True
+            if event.widget == self.ardu_image_label:
+                self.target_on_ground = True
             else:
-                self.target_on_ground=False
+                self.target_on_ground = False
             self._target_xy = (event.x, event.y)
             self._redraw_image_with_crosshairs()
             self._click_mode = SELECT_REFERENCE
@@ -626,7 +626,7 @@ class ReceiverApp:
 
         # Rotate image to remove roll before any geometric calculations.
         display_image = image.copy()
-        display_image2=image2.copy()
+        display_image2 = image2.copy()
         rotated_depth_map = depth_map.copy()
         if self._last_roll is not None:
             # Negative roll de-rotates the image so the horizon appears level.
@@ -643,28 +643,27 @@ class ReceiverApp:
 
         # Draw red dot in center of (possibly rotated) image
         draw = ImageDraw.Draw(display_image)
-        draw2=ImageDraw.Draw(display_image2)
+        draw2 = ImageDraw.Draw(display_image2)
         cx, cy = display_image.width // 2, display_image.height // 2
-        cx2,cy2=display_image2.width//2,display_image2.height//2
+        cx2, cy2 = display_image2.width // 2, display_image2.height // 2
         r = 2  # radius in pixels
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="red", outline="red")
-        draw2.ellipse([cx2-r,cy2-r,cx2+r,cy2+r], fill="red", outline="red")
-
+        draw2.ellipse([cx2 - r, cy2 - r, cx2 + r, cy2 + r], fill="red", outline="red")
 
         self._base_display_image = display_image.copy()
         self._base_depth_map = rotated_depth_map
-        self._base_display_image_arducam=display_image2.copy()
+        self._base_display_image_arducam = display_image2.copy()
         # Update image display
         photo = ImageTk.PhotoImage(image=display_image)
         ardu_photo = ImageTk.PhotoImage(image=display_image2)
-        self._current_ardu_photo=ardu_photo
+        self._current_ardu_photo = ardu_photo
         self._current_photo = photo
         self.image_label.config(image=photo)
         self.ardu_image_label.config(image=ardu_photo)
 
     def request_image(
         self,
-    ) -> Tuple[float, float, float, float, Image.Image, Image.Image,np.ndarray]:
+    ) -> Tuple[float, float, float, float, Image.Image, Image.Image, np.ndarray]:
         """
         Connects to the transmitter, sends a capture command, and receives:
         - downward range (float32), center depth (float32), pitch (float32 rad), roll (float32 rad)
@@ -686,16 +685,24 @@ class ReceiverApp:
                     f"Incomplete header received (expected 40 bytes, got {len(header)})"
                 )
 
-            downwards_range, center_depth, pitch, roll, image_length, depth_length, ardu_image_length = (
-                struct.unpack("!ffffQQQ", header)
-            )
+            (
+                downwards_range,
+                center_depth,
+                pitch,
+                roll,
+                image_length,
+                depth_length,
+                ardu_image_length,
+            ) = struct.unpack("!ffffQQQ", header)
 
             if image_length == 0:
                 raise RuntimeError("Transmitter reported zero-length image from oak-d")
             if depth_length == 0:
                 raise RuntimeError("Transmitter reported zero-length depth map")
-            if ardu_image_length==0:
-                raise RuntimeError("Transmitter reported zero-length image from arducam")
+            if ardu_image_length == 0:
+                raise RuntimeError(
+                    "Transmitter reported zero-length image from arducam"
+                )
 
             jpeg_bytes = self._recv_exact(sock, image_length)
             if len(jpeg_bytes) != image_length:
@@ -707,8 +714,8 @@ class ReceiverApp:
                 raise RuntimeError(
                     f"Incomplete depth map received (expected {depth_length} bytes, got {len(depth_bytes)})"
                 )
-            ardu_image_bytes=self._recv_exact(sock,ardu_image_length)
-            if len(ardu_image_bytes)!=ardu_image_length:
+            ardu_image_bytes = self._recv_exact(sock, ardu_image_length)
+            if len(ardu_image_bytes) != ardu_image_length:
                 raise RuntimeError(
                     f"Incomplete arducam image received (expected {ardu_image_length} bytes, got {len(ardu_image_bytes)})"
                 )
@@ -716,7 +723,7 @@ class ReceiverApp:
         try:
             image = Image.open(io.BytesIO(jpeg_bytes))
             image.load()
-            image2=Image.open(io.BytesIO(ardu_image_bytes))
+            image2 = Image.open(io.BytesIO(ardu_image_bytes))
             image2.load()
         except Exception as exc:
             raise RuntimeError(f"Failed to decode JPEG image: {exc}") from exc
@@ -728,7 +735,7 @@ class ReceiverApp:
         if depth_map.ndim != 2:
             raise RuntimeError(f"Depth map has unexpected shape: {depth_map.shape}")
 
-        return downwards_range, center_depth, pitch, roll, image,image2, depth_map
+        return downwards_range, center_depth, pitch, roll, image, image2, depth_map
 
     @staticmethod
     def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:

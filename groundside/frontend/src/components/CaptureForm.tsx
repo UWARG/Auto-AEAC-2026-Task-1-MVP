@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
-import type { ImagePair, SavedAnnotation } from "../types";
+import type { ImagePair, Point } from "../types";
+import { AnnotationOverlay } from "./AnnotationOverlay";
 
 type Props = {
   imagePair: ImagePair;
@@ -7,22 +8,25 @@ type Props = {
   onCapture: () => void;
   form: { colour: string; reference: string };
   setForm: React.Dispatch<React.SetStateAction<{ colour: string; reference: string }>>;
-  savedAnnotation: SavedAnnotation;
   outputPending: boolean;
-  setOutputPending: (v: boolean) => void;
   onSubmit: () => void;
+  isSubmitting: boolean;
   output: string;
   colourRef: RefObject<HTMLInputElement | null>;
   referenceRef: RefObject<HTMLInputElement | null>;
   outputBoxRef: RefObject<HTMLDivElement | null>;
   error: string;
   onOpenPopup: (url: string, imageType: "forward" | "downward") => void;
+  forwardGreen: Point | null;
+  forwardRed: Point | null;
+  downwardGreen: Point | null;
 };
 
 export function CaptureForm({
   imagePair, isCapturing, onCapture, form, setForm,
-  outputPending, setOutputPending, onSubmit, output,
+  outputPending, onSubmit, isSubmitting, output,
   colourRef, referenceRef, outputBoxRef, error, onOpenPopup,
+  forwardGreen, forwardRed, downwardGreen,
 }: Props) {
   return (
     <div className="w-full flex flex-col gap-6" style={{ maxWidth: "48rem", marginLeft: "auto", marginRight: "auto" }}>
@@ -31,7 +35,7 @@ export function CaptureForm({
       <div className="flex flex-col items-center gap-2">
         <button
           onClick={onCapture}
-          disabled={isCapturing}
+          disabled={isCapturing || isSubmitting}
           className="flex items-center gap-2 bg-zinc-900 text-white px-8 py-3 rounded-md text-sm font-semibold tracking-widest disabled:opacity-60 disabled:cursor-wait"
         >
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
@@ -60,24 +64,28 @@ export function CaptureForm({
               Forward — click or press{" "}
               <kbd className="px-1 bg-zinc-100 rounded border border-zinc-300 text-zinc-600 font-mono text-xs">F</kbd>
             </span>
-            <img
-              src={imagePair.forwardUrl}
-              alt="Forward capture"
-              className="w-full rounded-md cursor-pointer object-contain max-h-44 hover:ring-2 hover:ring-blue-300 transition-all"
-              onClick={() => onOpenPopup(imagePair.forwardUrl, "forward")}
-            />
+            <div style={{ position: "relative", display: "inline-block", width: "100%" }} onClick={() => onOpenPopup(imagePair.forwardUrl, "forward")}>
+              <img
+                src={imagePair.forwardUrl}
+                alt="Forward capture"
+                className="w-full rounded-md cursor-pointer object-contain max-h-44 hover:ring-2 hover:ring-blue-300 transition-all"
+              />
+              <AnnotationOverlay green={forwardGreen} red={forwardRed} />
+            </div>
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-xs text-zinc-500 text-center font-medium">
               Downward — click or press{" "}
               <kbd className="px-1 bg-zinc-100 rounded border border-zinc-300 text-zinc-600 font-mono text-xs">D</kbd>
             </span>
-            <img
-              src={imagePair.downwardUrl}
-              alt="Downward capture"
-              className="w-full rounded-md cursor-pointer object-contain max-h-44 hover:ring-2 hover:ring-blue-300 transition-all"
-              onClick={() => onOpenPopup(imagePair.downwardUrl, "downward")}
-            />
+            <div style={{ position: "relative", display: "inline-block", width: "100%" }} onClick={() => onOpenPopup(imagePair.downwardUrl, "downward")}>
+              <img
+                src={imagePair.downwardUrl}
+                alt="Downward capture"
+                className="w-full rounded-md cursor-pointer object-contain max-h-44 hover:ring-2 hover:ring-blue-300 transition-all"
+              />
+              <AnnotationOverlay green={downwardGreen} red={null} />
+            </div>
           </div>
         </div>
       ) : (
@@ -122,12 +130,7 @@ export function CaptureForm({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                if (outputPending) {
-                  onSubmit();
-                } else {
-                  setOutputPending(true);
-                  setTimeout(() => outputBoxRef.current?.focus(), 50);
-                }
+                onSubmit();
               }
             }}
           />

@@ -38,7 +38,7 @@ export function ImagePopup({
         </div>
         <div className="flex items-center gap-4">
           <span className="text-zinc-500 text-xs">
-            Scroll to zoom · Drag to pan · Esc to close
+            Scroll to zoom · Drag to pan · Enter to close
           </span>
           <button
             onClick={onClose}
